@@ -3,6 +3,7 @@ package intelligence
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -146,11 +147,88 @@ func TestSearch(t *testing.T) {
 	if !result.HasGoModule {
 		t.Fatal("expected Go module to be detected")
 	}
+	if result.Provider == "" {
+		t.Fatal("expected search provider to be reported")
+	}
 	if len(result.CandidateFiles) < 3 {
 		t.Fatalf("expected ranked candidates, got %#v", result.CandidateFiles)
 	}
 	if result.CandidateFiles[0] != "internal/auth/middleware.go" {
 		t.Fatalf("expected source file first, got %#v", result.CandidateFiles)
+	}
+}
+
+func TestScanWithGitRespectsIgnoreFiles(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		".gitignore":                  ".projectkitty/\nnode_modules/\n",
+		"go.mod":                      "module example.com/test\n\ngo 1.24.0\n",
+		"internal/auth/middleware.go": "package auth\n\nfunc AuthMiddleware() {}\n",
+		".projectkitty/session.md":    "auth middleware notes\n",
+		"node_modules/auth/index.js":  "export function authMiddleware() {}\n",
+	})
+
+	cmd := exec.Command("git", "init")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+
+	scored, hasGoModule, used, err := New().scanWithGit(context.Background(), dir, []string{"auth", "middleware"})
+	if err != nil {
+		t.Fatalf("scanWithGit: %v", err)
+	}
+	if !used {
+		t.Fatal("expected git scan to be used")
+	}
+	if !hasGoModule {
+		t.Fatal("expected go.mod detection")
+	}
+
+	paths := make([]string, 0, len(scored))
+	for _, candidate := range scored {
+		paths = append(paths, candidate.Path)
+	}
+	if !slices.Contains(paths, "internal/auth/middleware.go") {
+		t.Fatalf("expected source candidate, got %#v", paths)
+	}
+	if slices.Contains(paths, ".projectkitty/session.md") {
+		t.Fatalf("expected ignored internal state to be excluded, got %#v", paths)
+	}
+	if slices.Contains(paths, "node_modules/auth/index.js") {
+		t.Fatalf("expected ignored dependency file to be excluded, got %#v", paths)
+	}
+}
+
+func TestSearchReportsProviderInSummary(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"go.mod":                "module example.com/test\n\ngo 1.24.0\n",
+		"internal/auth/main.go": "package auth\n\nfunc AuthMiddleware() {}\n",
+		"internal/auth/http.go": "package auth\n\nfunc ServeHTTP() {}\n",
+		"docs/notes.md":         "auth middleware docs\n",
+	})
+
+	result, err := New().Search(context.Background(), Request{
+		Task:      "auth middleware",
+		Workspace: dir,
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if result.Provider == "" {
+		t.Fatal("expected provider")
+	}
+	if !strings.Contains(result.Summary, result.Provider) {
+		t.Fatalf("expected summary to include provider %q, got %q", result.Provider, result.Summary)
 	}
 }
 

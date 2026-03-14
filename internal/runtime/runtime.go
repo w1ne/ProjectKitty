@@ -9,9 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/w1ne/projectkitty/internal/intelligence"
 )
 
 type Tool string
@@ -140,15 +141,15 @@ func (r *Runtime) readSymbol(call Call) (Result, error) {
 		return Result{}, err
 	}
 
-	snippet := extractSymbolSnippet(string(content), call.Symbol)
-	if snippet == "" {
+	symbol := intelligence.FindSymbol(string(content), call.Path, call.Symbol)
+	if symbol == nil {
 		return Result{}, fmt.Errorf("symbol %q not found in %s", call.Symbol, call.Path)
 	}
 
 	return Result{
 		Tool:    ToolReadSymbol,
 		Summary: fmt.Sprintf("Read symbol %s from %s.", call.Symbol, call.Path),
-		Output:  snippet,
+		Output:  symbol.Snippet,
 	}, nil
 }
 
@@ -213,45 +214,4 @@ func (r *Runtime) checkPolicy(command string) error {
 	}
 
 	return fmt.Errorf("command requires approval in %s mode: %s", r.policy.ApprovalMode, normalized)
-}
-
-func extractSymbolSnippet(content, symbol string) string {
-	pattern := fmt.Sprintf(`(?m)^(\s*)(?:func\s+(?:\([^)]+\)\s*)?%s\b|type\s+%s\b)`, regexp.QuoteMeta(symbol), regexp.QuoteMeta(symbol))
-	matcher := regexp.MustCompile(pattern)
-	loc := matcher.FindStringIndex(content)
-	if loc == nil {
-		return ""
-	}
-
-	start := loc[0]
-	end := len(content)
-	rest := content[loc[1]:]
-	if next := matcher.FindStringIndex(rest); next != nil {
-		end = loc[1] + next[0]
-	}
-
-	if blockStart := strings.Index(content[start:end], "{"); blockStart >= 0 {
-		open := start + blockStart
-		if close := matchBrace(content, open); close > open {
-			end = close + 1
-		}
-	}
-
-	return strings.TrimSpace(content[start:end])
-}
-
-func matchBrace(content string, open int) int {
-	depth := 0
-	for i := open; i < len(content); i++ {
-		switch content[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return i
-			}
-		}
-	}
-	return -1
 }

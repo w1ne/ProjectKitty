@@ -42,6 +42,7 @@ type SearchResult struct {
 	CandidateFiles []string
 	Summary        string
 	HasGoModule    bool
+	Provider       string
 }
 
 type OutlineRequest struct {
@@ -91,7 +92,7 @@ var languageSpecs = []languageSpec{
 
 func (s *LocalService) Search(ctx context.Context, req Request) (SearchResult, error) {
 	tokens := taskTokens(req.Task)
-	scored, hasGoModule, err := s.collectCandidates(ctx, req.Workspace, tokens)
+	scored, hasGoModule, provider, err := s.collectCandidates(ctx, req.Workspace, tokens)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -114,12 +115,15 @@ func (s *LocalService) Search(ctx context.Context, req Request) (SearchResult, e
 
 	summary := "No relevant files found."
 	if len(files) > 0 {
-		summary = fmt.Sprintf("Focused context narrowed to %d files: %s", len(files), strings.Join(files, ", "))
+		summary = fmt.Sprintf("Focused context narrowed to %d files via %s: %s", len(files), provider, strings.Join(files, ", "))
+	} else if provider != "" {
+		summary = fmt.Sprintf("No relevant files found via %s.", provider)
 	}
 	return SearchResult{
 		CandidateFiles: files,
 		Summary:        summary,
 		HasGoModule:    hasGoModule,
+		Provider:       provider,
 	}, nil
 }
 
@@ -221,11 +225,15 @@ const (
 	fileKindDoc
 )
 
-func (s *LocalService) collectCandidates(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, error) {
+func (s *LocalService) collectCandidates(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, string, error) {
 	if rg, hasGoModule, used, err := s.scanWithRipgrep(ctx, workspace, tokens); used || err != nil {
-		return rg, hasGoModule, err
+		return rg, hasGoModule, "ripgrep", err
 	}
-	return s.scanWithWalk(ctx, workspace, tokens)
+	if gitFiles, hasGoModule, used, err := s.scanWithGit(ctx, workspace, tokens); used || err != nil {
+		return gitFiles, hasGoModule, "git ls-files", err
+	}
+	files, hasGoModule, err := s.scanWithWalk(ctx, workspace, tokens)
+	return files, hasGoModule, "workspace walk", err
 }
 
 func (s *LocalService) scanWithRipgrep(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, bool, error) {
@@ -242,9 +250,6 @@ func (s *LocalService) scanWithRipgrep(ctx context.Context, workspace string, to
 		"rg",
 		"--files-with-matches",
 		"--smart-case",
-		"--glob", "!node_modules/**",
-		"--glob", "!.git/**",
-		"--glob", "!.projectkitty/**",
 		pattern,
 		workspace,
 	)
@@ -304,6 +309,58 @@ func (s *LocalService) scanWithRipgrep(ctx context.Context, workspace string, to
 	return scored, hasGoModule, true, nil
 }
 
+func (s *LocalService) scanWithGit(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, bool, error) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return nil, false, false, nil
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "-C", workspace, "ls-files", "-co", "--exclude-standard", "-z")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false, false, nil
+	}
+
+	entries := strings.Split(string(out), "\x00")
+	scored := make([]scoredFile, 0, len(entries))
+	hasGoModule := false
+
+	for _, rel := range entries {
+		rel = filepath.ToSlash(strings.TrimSpace(rel))
+		if rel == "" {
+			continue
+		}
+
+		fullPath := filepath.Join(workspace, filepath.FromSlash(rel))
+		info, statErr := os.Stat(fullPath)
+		if statErr != nil || info.IsDir() || info.Size() > 256*1024 {
+			continue
+		}
+
+		content, readErr := os.ReadFile(fullPath)
+		if readErr != nil {
+			continue
+		}
+
+		if rel == "go.mod" {
+			hasGoModule = true
+		}
+
+		score := scoreFile(rel, string(content), tokens)
+		if score == 0 && rel != "go.mod" {
+			continue
+		}
+
+		scored = append(scored, scoredFile{
+			Path:    rel,
+			Score:   score,
+			Symbols: extractSymbols(string(content), rel),
+			Kind:    classifyFile(rel),
+		})
+	}
+
+	return scored, hasGoModule, true, nil
+}
+
 func (s *LocalService) scanWithWalk(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, error) {
 	scored := make([]scoredFile, 0, 16)
 	hasGoModule := false
@@ -320,7 +377,7 @@ func (s *LocalService) scanWithWalk(ctx context.Context, workspace string, token
 
 		name := d.Name()
 		if d.IsDir() {
-			if name == ".git" || name == ".projectkitty" || name == "node_modules" {
+			if strings.HasPrefix(name, ".") && path != workspace {
 				return filepath.SkipDir
 			}
 			return nil
@@ -433,6 +490,16 @@ func extractSymbols(content, path string) []SymbolMatch {
 		return symbols
 	}
 	return extractRegexSymbols(content, path)
+}
+
+func FindSymbol(content, path, name string) *SymbolMatch {
+	for _, symbol := range extractSymbols(content, path) {
+		if symbol.Name == name {
+			s := symbol
+			return &s
+		}
+	}
+	return nil
 }
 
 func extractTreeSitterSymbols(content, path string) []SymbolMatch {
