@@ -31,3 +31,13 @@ The current workspace is used as the default target. You can point it at another
 ```bash
 go test ./...
 ```
+
+For a stricter local check, run:
+
+```bash
+files="$(find . -name '*.go' -type f)"
+test -z "$(gofmt -l $files)"
+go test ./...
+```
+
+CI runs the same formatting and test checks on every push and pull request through [`.github/workflows/ci.yml`](/home/andrii/Projects/projectKitty/.github/workflows/ci.yml).
