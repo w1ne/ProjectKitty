@@ -1,6 +1,8 @@
 # ProjectKitty
 
-ProjectKitty is an open-source terminal coding agent prototype that implements the Article 1 foundation:
+ProjectKitty is an open-source terminal coding agent focused on practical repository inspection, controlled execution, durable memory, and a responsive terminal UI.
+
+The current implementation includes:
 
 - planner
 - code intelligence
@@ -8,7 +10,7 @@ ProjectKitty is an open-source terminal coding agent prototype that implements t
 - durable memory
 - Bubble Tea terminal UI
 
-The repository is intentionally scoped to the first article. It focuses on the agentic loop and clean subsystem boundaries rather than deep code parsing, PTY execution, or model integration.
+Right now the focus is the agentic loop and clean subsystem boundaries rather than deep code parsing, PTY execution, or model integration.
 
 ## Current Capabilities
 
