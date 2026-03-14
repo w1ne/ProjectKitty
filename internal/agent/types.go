@@ -12,8 +12,15 @@ type EventKind string
 const (
 	EventStarted  EventKind = "started"
 	EventPlanning EventKind = "planning"
+	EventThought  EventKind = "thought"
 	EventAction   EventKind = "action"
-	EventObserved EventKind = "observed"
+	EventObserved EventKind = "observed" // Base type
+
+	// Specific observed types (Gemini style)
+	EventSearchObserved  EventKind = "search_observed"
+	EventOutlineObserved EventKind = "outline_observed"
+	EventSymbolObserved  EventKind = "symbol_observed"
+
 	EventMemory   EventKind = "memory"
 	EventFinished EventKind = "finished"
 	EventErrored  EventKind = "errored"
@@ -75,10 +82,11 @@ const (
 )
 
 type Decision struct {
-	Kind    ActionKind
-	Title   string
-	Detail  string
-	Command string
-	Path    string
-	Symbol  string
+	Kind     ActionKind
+	Title    string
+	Detail   string
+	Thoughts string // Added for Gemini-style thought emission
+	Command  string
+	Path     string
+	Symbol   string
 }

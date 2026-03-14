@@ -15,51 +15,57 @@ func NewPlanner() *DefaultPlanner {
 func (p *DefaultPlanner) Next(state State) Decision {
 	if state.SearchTool == nil || state.SearchTool.Result == nil {
 		return Decision{
-			Kind:   ActionSearchRepository,
-			Title:  "Search repository",
-			Detail: "Use cheap search to find the smallest useful repository slice.",
+			Kind:     ActionSearchRepository,
+			Title:    "Search repository",
+			Detail:   "Use cheap search to find the smallest useful repository slice.",
+			Thoughts: "Whiskers needs to narrow the search space before parsing to remain efficient like Claude and Codex.",
 		}
 	}
 
 	if state.OutlineTool == nil || state.OutlineTool.Result == nil {
 		return Decision{
-			Kind:   ActionOutlineContext,
-			Title:  "Outline candidate files",
-			Detail: "Extract top-level symbols from likely files before reading code.",
+			Kind:     ActionOutlineContext,
+			Title:    "Outline candidate files",
+			Detail:   "Extract top-level symbols from likely files before reading code.",
+			Thoughts: "Structural outlining is faster than reading full files. Mirroring the 'Outline' stage from the research.",
 		}
 	}
 
 	if state.OutlineTool.Result.FocusedSymbol != nil && (state.ReadSymbolTool == nil || state.ReadSymbolTool.Result == nil) {
 		return Decision{
-			Kind:   ActionInspectSymbol,
-			Title:  "Inspect focused symbol",
-			Detail: "Read the smallest useful symbol before running repository validation.",
-			Path:   state.OutlineTool.Result.FocusedSymbol.Path,
-			Symbol: state.OutlineTool.Result.FocusedSymbol.Name,
+			Kind:     ActionInspectSymbol,
+			Title:    "Inspect focused symbol",
+			Detail:   "Read the smallest useful symbol before running repository validation.",
+			Thoughts: "We found a strong symbol match. Reading only this symbol reduces context usage and potential noise.",
+			Path:     state.OutlineTool.Result.FocusedSymbol.Path,
+			Symbol:   state.OutlineTool.Result.FocusedSymbol.Name,
 		}
 	}
 
 	if state.ValidationTool == nil || state.ValidationTool.Result == nil {
 		return Decision{
-			Kind:    ActionRunCommand,
-			Title:   "Run safe validation",
-			Detail:  "Execute the safest command that can validate the current repository state.",
-			Command: chooseValidationCommand(state),
+			Kind:     ActionRunCommand,
+			Title:    "Run safe validation",
+			Detail:   "Execute the safest command that can validate the current repository state.",
+			Thoughts: "Validation confirms our understanding of the changes. Choosing the most targeted command available.",
+			Command:  chooseValidationCommand(state),
 		}
 	}
 
 	if !state.MemorySaved {
 		return Decision{
-			Kind:   ActionSaveMemory,
-			Title:  "Persist findings",
-			Detail: "Write the key findings into durable project memory and the session log.",
+			Kind:     ActionSaveMemory,
+			Title:    "Persist findings",
+			Detail:   "Write the key findings into durable project memory and the session log.",
+			Thoughts: "Durable memory prevents information loss across sessions, similar to Claude's MEMORY.md and Codex's SQLite state.",
 		}
 	}
 
 	return Decision{
-		Kind:   ActionFinish,
-		Title:  "Finish",
-		Detail: "The foundational meow loop has completed.",
+		Kind:     ActionFinish,
+		Title:    "Finish",
+		Detail:   "The foundational meow loop has completed.",
+		Thoughts: "All stages (Search -> Outline -> Read -> Validate) are finished. Repository state is confirmed.",
 	}
 }
 

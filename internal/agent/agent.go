@@ -47,6 +47,10 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 			step := state.Steps + 1
 			events <- newEvent(EventPlanning, step, decision.Title, decision.Detail)
 
+			if decision.Thoughts != "" {
+				events <- newEvent(EventThought, step, "Thinking", decision.Thoughts)
+			}
+
 			if err := a.memory.RecordSessionEvent(sessionID, "plan", decision.Title+": "+decision.Detail); err != nil {
 				events <- newErrorEvent(step, "Record plan", err)
 				return
@@ -67,7 +71,7 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 					Request: req,
 					Result:  &search,
 				}
-				events <- newEvent(EventObserved, step, "Search results", search.Summary)
+				events <- newEvent(EventSearchObserved, step, "Search results", search.Summary)
 				if err := a.memory.RecordSessionEvent(sessionID, "search", search.Summary); err != nil {
 					events <- newErrorEvent(step, "Record search", err)
 					return
@@ -88,7 +92,7 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 					Request: req,
 					Result:  &outline,
 				}
-				events <- newEvent(EventObserved, step, "Outline results", outline.Summary)
+				events <- newEvent(EventOutlineObserved, step, "Outline results", outline.Summary)
 				if err := a.memory.RecordSessionEvent(sessionID, "outline", outline.Summary); err != nil {
 					events <- newErrorEvent(step, "Record outline", err)
 					return
@@ -111,7 +115,7 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 					Call:   call,
 					Result: &result,
 				}
-				events <- newEvent(EventObserved, step, "Focused symbol", result.Summary)
+				events <- newEvent(EventSymbolObserved, step, "Focused symbol", result.Summary)
 				if err := a.memory.RecordSessionEvent(sessionID, "read_symbol", result.Summary); err != nil {
 					events <- newErrorEvent(step, "Record symbol read", err)
 					return

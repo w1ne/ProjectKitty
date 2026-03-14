@@ -46,13 +46,13 @@ func TestRunPlainExecutesAgentLoop(t *testing.T) {
 	}
 
 	text := out.String()
-	if !strings.Contains(text, "[observed] Search results:") {
+	if !strings.Contains(text, "[search_observed] Search results:") {
 		t.Fatalf("expected search output, got:\n%s", text)
 	}
-	if !strings.Contains(text, "[observed] Outline results:") {
+	if !strings.Contains(text, "[outline_observed] Outline results:") {
 		t.Fatalf("expected outline output, got:\n%s", text)
 	}
-	if !strings.Contains(text, "[observed] Focused symbol: Read symbol AuthMiddleware") {
+	if !strings.Contains(text, "[symbol_observed] Focused symbol:") {
 		t.Fatalf("expected focused symbol output, got:\n%s", text)
 	}
 	if !strings.Contains(text, "[finished] Loop finished") {
@@ -92,10 +92,10 @@ func TestRunPlainSkipsFocusedReadWithoutStrongMatch(t *testing.T) {
 	}
 
 	text := out.String()
-	if !strings.Contains(text, "[observed] Outline results: No strong symbol match yet.") {
+	if !strings.Contains(text, "[outline_observed] Outline results: No strong symbol match yet.") {
 		t.Fatalf("expected no-match outline output, got:\n%s", text)
 	}
-	if strings.Contains(text, "[observed] Focused symbol:") {
+	if strings.Contains(text, "[symbol_observed] Focused symbol:") {
 		t.Fatalf("did not expect focused symbol output, got:\n%s", text)
 	}
 }

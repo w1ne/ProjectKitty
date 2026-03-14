@@ -54,13 +54,13 @@ func TestAgentRunPersistsSessionAndFacts(t *testing.T) {
 	var sawSearch bool
 	var sawOutline bool
 	for _, event := range events {
-		if event.Kind == EventObserved && event.Title == "Search results" {
+		if event.Kind == EventSearchObserved && event.Title == "Search results" {
 			sawSearch = true
 		}
-		if event.Kind == EventObserved && event.Title == "Outline results" {
+		if event.Kind == EventOutlineObserved && event.Title == "Outline results" {
 			sawOutline = true
 		}
-		if event.Kind == EventObserved && event.Title == "Focused symbol" {
+		if event.Kind == EventSymbolObserved && event.Title == "Focused symbol" {
 			sawFocusedRead = true
 		}
 		if event.Kind == EventMemory {
@@ -134,13 +134,13 @@ func TestAgentRunSkipsFocusedReadWhenNoStrongMatch(t *testing.T) {
 	var sawOutline bool
 	var sawFocusedRead bool
 	for _, event := range events {
-		if event.Kind == EventObserved && event.Title == "Outline results" {
+		if event.Kind == EventOutlineObserved && event.Title == "Outline results" {
 			sawOutline = true
 			if !strings.Contains(event.Detail, "No strong symbol match yet") {
 				t.Fatalf("unexpected outline detail: %q", event.Detail)
 			}
 		}
-		if event.Kind == EventObserved && event.Title == "Focused symbol" {
+		if event.Kind == EventSymbolObserved && event.Title == "Focused symbol" {
 			sawFocusedRead = true
 		}
 	}

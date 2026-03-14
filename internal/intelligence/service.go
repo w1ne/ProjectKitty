@@ -18,6 +18,8 @@ import (
 	tree_sitter_java "github.com/tree-sitter/tree-sitter-java/bindings/go"
 	tree_sitter_javascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
 	tree_sitter_python "github.com/tree-sitter/tree-sitter-python/bindings/go"
+	tree_sitter_ruby "github.com/tree-sitter/tree-sitter-ruby/bindings/go"
+	tree_sitter_rust "github.com/tree-sitter/tree-sitter-rust/bindings/go"
 	tree_sitter_typescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
@@ -78,14 +80,9 @@ type SymbolMatch struct {
 	Confidence int
 }
 
-type LocalService struct{}
-
-func New() *LocalService {
-	return &LocalService{}
-}
-
 var symbolPattern = regexp.MustCompile(`(?m)^(\s*)(?:func\s+(?:\([^)]+\)\s*)?([A-Za-z_][A-Za-z0-9_]*)|type\s+([A-Za-z_][A-Za-z0-9_]*))`)
 var receiverTypePattern = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+var importPattern = regexp.MustCompile(`(?m)^(?:\s*import\s+(?:\w+\s+)?"([^"]+)"|\s*import\s+\((?:\s*(?:\w+\s+)?"([^"]+)")*\s*\))`)
 
 type languageSpec struct {
 	lang       *tree_sitter.Language
@@ -99,10 +96,14 @@ var languageSpecs = []languageSpec{
 	{lang: tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()), extensions: []string{".ts"}},
 	{lang: tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTSX()), extensions: []string{".tsx"}},
 	{lang: tree_sitter.NewLanguage(tree_sitter_python.Language()), extensions: []string{".py"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_rust.Language()), extensions: []string{".rs"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_ruby.Language()), extensions: []string{".rb"}},
 	{lang: tree_sitter.NewLanguage(tree_sitter_bash.Language()), extensions: []string{".sh", ".bash"}},
 }
 
-func (s *LocalService) Search(ctx context.Context, req Request) (SearchResult, error) {
+type SearchTool struct{}
+
+func (t *SearchTool) Search(ctx context.Context, s *LocalService, req Request) (SearchResult, error) {
 	tokens := taskTokens(req.Task)
 	scored, hasGoModule, provider, passes, err := s.searchMultiPass(ctx, req.Workspace, tokens)
 	if err != nil {
@@ -140,7 +141,9 @@ func (s *LocalService) Search(ctx context.Context, req Request) (SearchResult, e
 	}, nil
 }
 
-func (s *LocalService) Outline(ctx context.Context, req OutlineRequest) (OutlineResult, error) {
+type OutlineTool struct{}
+
+func (t *OutlineTool) Outline(ctx context.Context, s *LocalService, req OutlineRequest) (OutlineResult, error) {
 	tokens := taskTokens(req.Task)
 	symbols := make(map[string][]string, len(req.Files))
 	var focused *SymbolMatch
@@ -212,6 +215,26 @@ func (s *LocalService) Outline(ctx context.Context, req OutlineRequest) (Outline
 		RelatedFiles:  nil,
 		Summary:       summary,
 	}, nil
+}
+
+type LocalService struct {
+	searchTool  *SearchTool
+	outlineTool *OutlineTool
+}
+
+func New() *LocalService {
+	return &LocalService{
+		searchTool:  &SearchTool{},
+		outlineTool: &OutlineTool{},
+	}
+}
+
+func (s *LocalService) Search(ctx context.Context, req Request) (SearchResult, error) {
+	return s.searchTool.Search(ctx, s, req)
+}
+
+func (s *LocalService) Outline(ctx context.Context, req OutlineRequest) (OutlineResult, error) {
+	return s.outlineTool.Outline(ctx, s, req)
 }
 
 func (s *LocalService) Scan(ctx context.Context, req Request) (ContextSnapshot, error) {
@@ -618,7 +641,7 @@ func scoreFile(path, content string, tokens []string) int {
 	matched := false
 	for _, token := range tokens {
 		if strings.Contains(lowerPath, token) {
-			score += 4
+			score += 5 // Slightly increased from 4
 			matched = true
 		}
 		if strings.Contains(lowerContent, token) {
@@ -629,6 +652,18 @@ func scoreFile(path, content string, tokens []string) int {
 	if !matched {
 		return 0
 	}
+
+	// Boost for structural overlap (Claude/Codex style)
+	symbols := extractSymbols(content, path)
+	for _, s := range symbols {
+		lowerName := strings.ToLower(s.Name)
+		for _, token := range tokens {
+			if strings.Contains(lowerName, token) {
+				score += 2 // Boost for each symbol name match
+			}
+		}
+	}
+
 	score += fileTypeBias(lowerPath)
 	return score
 }
@@ -726,7 +761,7 @@ func symbolFromNode(content, path string, node *tree_sitter.Node, classContext s
 		return nil
 	case "type_spec":
 		return buildSymbol(content, path, node, "type", textForNode(content, nameNode))
-	case "function_declaration", "function_definition", "generator_function_declaration", "function_signature":
+	case "function_declaration", "function_definition", "generator_function_declaration", "function_signature", "function_item", "method":
 		return buildSymbol(content, path, node, "func", textForNode(content, nameNode))
 	case "method_declaration":
 		name := textForNode(content, nameNode)
@@ -740,7 +775,7 @@ func symbolFromNode(content, path string, node *tree_sitter.Node, classContext s
 			name = classContext + "." + name
 		}
 		return buildSymbol(content, path, node, "func", name)
-	case "class_declaration", "class_definition", "interface_declaration", "type_alias_declaration", "enum_declaration":
+	case "class_declaration", "class_definition", "interface_declaration", "type_alias_declaration", "enum_declaration", "struct_item", "enum_item", "trait_item", "class", "module":
 		return buildSymbol(content, path, node, "type", textForNode(content, nameNode))
 	case "decorated_definition":
 		return symbolFromNode(content, path, node.ChildByFieldName("definition"), classContext)
@@ -896,9 +931,10 @@ func scoreSymbol(symbol SymbolMatch, tokens []string, base int, relatedFiles []s
 	lowerPath := strings.ToLower(symbol.Path)
 	for _, token := range tokens {
 		if strings.Contains(lowerName, token) {
-			score += 6
+			score += 15 // Heavily increased from 6 to prioritize declarations
 		}
 		if strings.Contains(lowerSnippet, token) {
+			// Snippet matches are now much lower value relative to name
 			score += 1
 		}
 		if strings.Contains(lowerPath, token) {
@@ -908,7 +944,8 @@ func scoreSymbol(symbol SymbolMatch, tokens []string, base int, relatedFiles []s
 	if strings.HasSuffix(lowerPath, "_test.go") {
 		score -= 4
 	}
-	score += len(relatedFiles) * 3
+	// Relationships (Gemini/Claude style) provide a strong boost
+	score += len(relatedFiles) * 5 // Increased from 3
 	return score
 }
 
@@ -932,6 +969,28 @@ func hasStructuralTokenMatch(symbol SymbolMatch, tokens []string) bool {
 
 func (s *LocalService) findRelatedFiles(ctx context.Context, workspace string, symbol SymbolMatch) ([]string, error) {
 	terms := referenceTerms(symbol.Name)
+
+	fullPath := filepath.Join(workspace, filepath.FromSlash(symbol.Path))
+	content, err := os.ReadFile(fullPath)
+	if err == nil {
+		// Add same-package files as candidates
+		dir := filepath.Dir(symbol.Path)
+		if dir != "." && dir != "" {
+			terms = append(terms, dir)
+		}
+
+		// Add imported packages as terms (Claude style)
+		imports := extractGoImports(string(content))
+		for _, imp := range imports {
+			if strings.Contains(imp, "/") {
+				parts := strings.Split(imp, "/")
+				terms = append(terms, parts[len(parts)-1])
+			} else {
+				terms = append(terms, imp)
+			}
+		}
+	}
+
 	if len(terms) == 0 {
 		return nil, nil
 	}
@@ -940,6 +999,20 @@ func (s *LocalService) findRelatedFiles(ctx context.Context, workspace string, s
 		return related, err
 	}
 	return findRelatedFilesWithWalk(ctx, workspace, symbol.Path, terms)
+}
+
+func extractGoImports(content string) []string {
+	matches := importPattern.FindAllStringSubmatch(content, -1)
+	imports := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if match[1] != "" {
+			imports = append(imports, match[1])
+		}
+		if match[2] != "" {
+			imports = append(imports, match[2])
+		}
+	}
+	return imports
 }
 
 func referenceTerms(name string) []string {
