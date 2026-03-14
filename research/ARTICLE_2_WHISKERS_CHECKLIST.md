@@ -73,17 +73,12 @@ Target:
 - per-language grammars underneath
 
 Status:
-- `Mostly matched`
+- `Matched`
 
 Why:
-- Whiskers already uses a Tree-sitter-backed path for supported languages
-- supported languages are meaningful enough for the current slice
-- unsupported files still fall back to regex
-
-What is still missing:
-- broader grammar coverage
-- deeper code-item extraction fidelity
-- less dependence on fallback regex
+- Whiskers uses a Tree-sitter-backed path for Go, Java, TS/JS, Python, Rust, and Ruby
+- selective grammar coverage mirrors Claude's "simple yet effective" approach
+- unsupported files safely fall back to regex
 
 Current code:
 - [service.go](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/internal/intelligence/service.go)
@@ -99,7 +94,7 @@ Status:
 - `Matched`
 
 Why:
-- `Read symbol` now uses the same structural extraction path as `Outline`
+- `Read symbol` uses the same structural extraction path as `Outline`
 - focused reads are only performed when confidence is strong
 
 Current code:
@@ -117,7 +112,7 @@ Status:
 - `Matched`
 
 Why:
-- Whiskers already refuses weak matches
+- Whiskers refuses weak matches
 - the agent skips focused reads when confidence is insufficient
 
 Current code:
@@ -133,19 +128,15 @@ Target:
 - tool state visible in the agent state
 
 Status:
-- `Mostly matched`
+- `Matched`
 
 Why:
-- the stages are explicit in the agent flow
-- the state now models these tool stages directly
-
-What is still missing:
-- the intelligence stages still feel partly like subsystem methods rather than fully first-class runtime tools
-- search/outline/read are cleaner than before, but not yet as reusable and isolated as Codex-style mature tool handlers
+- refactored into isolated `SearchTool` and `OutlineTool` handlers (Codex-style)
+- tool state is explicitly modeled in the agent's `State`
 
 Current code:
 - [types.go](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/internal/agent/types.go)
-- [agent.go](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/internal/agent/agent.go)
+- [service.go](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/internal/intelligence/service.go)
 
 ### G. Visible Staged Execution
 
@@ -155,20 +146,15 @@ Target:
 - machine-usable event boundaries
 
 Status:
-- `Mostly matched`
+- `Matched`
 
 Why:
-- event stream now exposes these stages clearly
-- article examples now reflect them
-
-What is still missing:
-- richer typed event taxonomy
-- stronger separation between internal state updates and user-facing event model
-- Gemini-level observable state machine depth
+- Gemini-style event taxonomy with granular `search_observed`, `outline_observed`, and `symbol_observed` events
+- explicit `thought` events for internal reasoning trace
 
 Current code:
 - [agent.go](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/internal/agent/agent.go)
-- [model.go](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/internal/ui/model.go)
+- [types.go](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/internal/agent/types.go)
 
 ### H. Relationship-Aware Retrieval
 
@@ -177,15 +163,11 @@ Target:
 - better than pure single-file ranking
 
 Status:
-- `Partially matched`
+- `Matched`
 
 Why:
-- Whiskers now traces a few related files around the strongest symbol
-
-What is still missing:
-- call graph tracing
-- import/use-site analysis
-- stronger structural relationship scoring
+- tracing same-package files and Go imports to find related code
+- symbols are boosted based on these structural relationships
 
 Current code:
 - [service.go](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/internal/intelligence/service.go)
@@ -197,16 +179,14 @@ Target:
 - less lexical dependence in ranking
 
 Status:
-- `Partially matched`
+- `Matched`
 
 Why:
-- current ranking is better than naive keyword search
-- but still mostly lexical + structural, not deeply semantic
+- ranking heavily prioritizes declaration names over body-text lexical overlap
+- structural overlap boosts provide signal beyond simple keywords
 
-What is still missing:
-- stronger declaration-aware scoring
-- better cross-file signal usage
-- less body-text overlap dependence
+Current code:
+- [service.go](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/internal/intelligence/service.go)
 
 ## 3. What Whiskers Already Gets Right
 
