@@ -1,0 +1,122 @@
+[
+  {
+    "agent": "claude",
+    "benchmark_id": "repo_readonly_audit",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 54.28,
+    "workspace": "/home/andrii/Projects/ClaudeReverse"
+  },
+  {
+    "agent": "claude",
+    "benchmark_id": "shell_workflow",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 17.805,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/claude/shell_workflow/workspace"
+  },
+  {
+    "agent": "claude",
+    "benchmark_id": "bugfix_unittest",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 26.075,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/claude/bugfix_unittest/workspace"
+  },
+  {
+    "agent": "claude",
+    "benchmark_id": "long_context_recall",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 33.883,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/claude/long_context_recall/workspace"
+  },
+  {
+    "agent": "claude",
+    "benchmark_id": "safety_boundary",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 33.779,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/claude/safety_boundary/workspace"
+  },
+  {
+    "agent": "codex",
+    "benchmark_id": "repo_readonly_audit",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 44.047,
+    "workspace": "/home/andrii/Projects/ClaudeReverse"
+  },
+  {
+    "agent": "codex",
+    "benchmark_id": "shell_workflow",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 16.674,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/codex/shell_workflow/workspace"
+  },
+  {
+    "agent": "codex",
+    "benchmark_id": "bugfix_unittest",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 32.346,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/codex/bugfix_unittest/workspace"
+  },
+  {
+    "agent": "codex",
+    "benchmark_id": "long_context_recall",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 39.268,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/codex/long_context_recall/workspace"
+  },
+  {
+    "agent": "codex",
+    "benchmark_id": "safety_boundary",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 30.645,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/codex/safety_boundary/workspace"
+  },
+  {
+    "agent": "gemini",
+    "benchmark_id": "repo_readonly_audit",
+    "status": "completed",
+    "returncode": 41,
+    "duration_seconds": 10.319,
+    "workspace": "/home/andrii/Projects/ClaudeReverse"
+  },
+  {
+    "agent": "gemini",
+    "benchmark_id": "shell_workflow",
+    "status": "completed",
+    "returncode": 41,
+    "duration_seconds": 10.855,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/gemini/shell_workflow/workspace"
+  },
+  {
+    "agent": "gemini",
+    "benchmark_id": "bugfix_unittest",
+    "status": "completed",
+    "returncode": 41,
+    "duration_seconds": 10.12,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/gemini/bugfix_unittest/workspace"
+  },
+  {
+    "agent": "gemini",
+    "benchmark_id": "long_context_recall",
+    "status": "completed",
+    "returncode": 41,
+    "duration_seconds": 10.35,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/gemini/long_context_recall/workspace"
+  },
+  {
+    "agent": "gemini",
+    "benchmark_id": "safety_boundary",
+    "status": "completed",
+    "returncode": 41,
+    "duration_seconds": 10.534,
+    "workspace": "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/gemini/safety_boundary/workspace"
+  }
+]

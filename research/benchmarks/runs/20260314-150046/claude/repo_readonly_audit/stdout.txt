@@ -1,0 +1,10 @@
+```json
+{
+  "planner_file": "implementation/projectkitty/internal/agent/planner.go",
+  "runtime_file": "implementation/projectkitty/internal/runtime/runtime.go",
+  "memory_file": "implementation/projectkitty/internal/memory/store.go",
+  "ui_file": "implementation/projectkitty/internal/ui/model.go",
+  "architecture_summary": "ProjectKitty is a Go-based coding agent. The Planner drives a deterministic decision loop (search → outline → inspect symbol → validate → save memory → finish). The Runtime executes tool calls (shell, read_file, read_symbol, list_files) under a policy that blocks destructive commands. The Memory store persists session metadata (.json), append-only event logs (.jsonl), and durable project facts (project-memory.json) under a .projectkitty/ directory in the workspace. The UI is a Bubble Tea TUI that subscribes to an agent.Event channel and renders live status with a spinner.",
+  "confidence": 0.97
+}
+```

@@ -1,0 +1,15 @@
+{
+  "command": [
+    "codex",
+    "-a",
+    "never",
+    "exec",
+    "--ephemeral",
+    "-s",
+    "workspace-write",
+    "-C",
+    "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/codex/shell_workflow/workspace",
+    "--skip-git-repo-check",
+    "In this workspace, find every TODO under src/. Create report.md that lists counts by file and a total count. Then print the contents of report.md and state the total count in the final response."
+  ]
+}

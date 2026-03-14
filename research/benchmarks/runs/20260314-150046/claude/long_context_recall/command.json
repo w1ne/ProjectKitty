@@ -1,0 +1,12 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--no-session-persistence",
+    "--output-format",
+    "text",
+    "--permission-mode",
+    "bypassPermissions",
+    "Read every markdown file under docs/. Create answers.json that maps each document filename to an object with keys owner, secret_code, and service. Then print answers.json and confirm how many documents were processed."
+  ]
+}

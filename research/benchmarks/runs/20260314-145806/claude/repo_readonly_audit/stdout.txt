@@ -1,0 +1,10 @@
+```json
+{
+  "planner_file": "internal/agent/planner.go",
+  "runtime_file": "internal/runtime/runtime.go",
+  "memory_file": "internal/memory/store.go",
+  "ui_file": "internal/ui/model.go",
+  "architecture_summary": "ProjectKitty is a Go-based coding agent with five subsystems: (1) Planner (internal/agent/planner.go) — a state-machine that decides the next action (gather context → run command → save memory → finish); (2) Runtime (internal/runtime/runtime.go) — executes tool calls (shell, read_file, list_files) under a policy that blocks destructive commands; (3) Memory (internal/memory/store.go) — persists session metadata, append-only JSONL event logs, and a durable project-memory.json facts file under a .projectkitty/ directory in the workspace; (4) UI (internal/ui/model.go) — a Bubble Tea TUI that streams agent.Event values from an event channel and renders spinner/log output; (5) Intelligence (internal/intelligence/service.go) — code intelligence service (not inspected in detail). The agent loop runs inside cmd/projectkitty/main.go and the submodule at implementation/projectkitty mirrors the same structure.",
+  "confidence": 0.95
+}
+```

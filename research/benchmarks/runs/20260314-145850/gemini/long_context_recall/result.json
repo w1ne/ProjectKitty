@@ -1,0 +1,7 @@
+{
+  "benchmark_id": "long_context_recall",
+  "description": "Read multiple fact-bearing documents and consolidate their facts into one file.",
+  "status": "completed",
+  "returncode": 41,
+  "duration_seconds": 10.35
+}

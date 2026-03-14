@@ -1,0 +1,10 @@
+```json
+{
+  "planner_file": "implementation/projectkitty/internal/agent/planner.go",
+  "runtime_file": "implementation/projectkitty/internal/runtime/runtime.go",
+  "memory_file": "implementation/projectkitty/internal/memory/store.go",
+  "ui_file": "implementation/projectkitty/internal/ui/model.go",
+  "architecture_summary": "ProjectKitty is a modular agentic loop framework for safe repository inspection. The agent (internal/agent/agent.go) orchestrates a deterministic 'meow loop': the Planner decides next actions (gather context, run command, save memory, finish), the Intelligence service scans the repo for context, the Runtime executes whitelisted shell/FS commands with policy enforcement, and the Memory store persists sessions and facts to .projectkitty/. A Bubble Tea TUI streams events in real time. Entry point is cmd/projectkitty/main.go, which wires all components via dependency injection.",
+  "confidence": 0.97
+}
+```

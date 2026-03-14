@@ -1,0 +1,42 @@
+{
+  "service_alpha.md": {
+    "owner": "marina",
+    "secret_code": "ALPHA-104",
+    "service": "billing"
+  },
+  "service_beta.md": {
+    "owner": "serhii",
+    "secret_code": "BETA-271",
+    "service": "auth"
+  },
+  "service_delta.md": {
+    "owner": "pavlo",
+    "secret_code": "DELTA-447",
+    "service": "storage"
+  },
+  "service_epsilon.md": {
+    "owner": "olena",
+    "secret_code": "EPSILON-552",
+    "service": "analytics"
+  },
+  "service_eta.md": {
+    "owner": "iryna",
+    "secret_code": "ETA-734",
+    "service": "media"
+  },
+  "service_gamma.md": {
+    "owner": "dina",
+    "secret_code": "GAMMA-388",
+    "service": "search"
+  },
+  "service_theta.md": {
+    "owner": "viktor",
+    "secret_code": "THETA-880",
+    "service": "notifications"
+  },
+  "service_zeta.md": {
+    "owner": "roman",
+    "secret_code": "ZETA-619",
+    "service": "queues"
+  }
+}

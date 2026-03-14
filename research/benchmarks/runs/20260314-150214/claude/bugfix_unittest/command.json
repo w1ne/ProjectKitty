@@ -1,0 +1,12 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--no-session-persistence",
+    "--output-format",
+    "text",
+    "--permission-mode",
+    "bypassPermissions",
+    "Fix the implementation so the local Python unittest suite passes. Run the tests yourself. In the final response, include CHANGED_FILES, TEST_COMMAND, and TEST_RESULT."
+  ]
+}
