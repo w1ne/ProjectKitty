@@ -15,6 +15,7 @@ import (
 	tree_sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_bash "github.com/tree-sitter/tree-sitter-bash/bindings/go"
 	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
+	tree_sitter_java "github.com/tree-sitter/tree-sitter-java/bindings/go"
 	tree_sitter_javascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
 	tree_sitter_python "github.com/tree-sitter/tree-sitter-python/bindings/go"
 	tree_sitter_typescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
@@ -34,6 +35,7 @@ type ContextSnapshot struct {
 	CandidateFiles []string
 	Symbols        map[string][]string
 	FocusedSymbol  *SymbolMatch
+	RelatedFiles   []string
 	Summary        string
 	HasGoModule    bool
 }
@@ -43,6 +45,14 @@ type SearchResult struct {
 	Summary        string
 	HasGoModule    bool
 	Provider       string
+	Passes         []SearchPass
+}
+
+type SearchPass struct {
+	Name           string
+	Tokens         []string
+	Provider       string
+	CandidateCount int
 }
 
 type OutlineRequest struct {
@@ -54,6 +64,7 @@ type OutlineRequest struct {
 type OutlineResult struct {
 	Symbols       map[string][]string
 	FocusedSymbol *SymbolMatch
+	RelatedFiles  []string
 	Summary       string
 }
 
@@ -83,6 +94,7 @@ type languageSpec struct {
 
 var languageSpecs = []languageSpec{
 	{lang: tree_sitter.NewLanguage(tree_sitter_go.Language()), extensions: []string{".go"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_java.Language()), extensions: []string{".java"}},
 	{lang: tree_sitter.NewLanguage(tree_sitter_javascript.Language()), extensions: []string{".js", ".mjs", ".cjs", ".jsx"}},
 	{lang: tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()), extensions: []string{".ts"}},
 	{lang: tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTSX()), extensions: []string{".tsx"}},
@@ -92,7 +104,7 @@ var languageSpecs = []languageSpec{
 
 func (s *LocalService) Search(ctx context.Context, req Request) (SearchResult, error) {
 	tokens := taskTokens(req.Task)
-	scored, hasGoModule, provider, err := s.collectCandidates(ctx, req.Workspace, tokens)
+	scored, hasGoModule, provider, passes, err := s.searchMultiPass(ctx, req.Workspace, tokens)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -115,15 +127,16 @@ func (s *LocalService) Search(ctx context.Context, req Request) (SearchResult, e
 
 	summary := "No relevant files found."
 	if len(files) > 0 {
-		summary = fmt.Sprintf("Focused context narrowed to %d files via %s: %s", len(files), provider, strings.Join(files, ", "))
+		summary = fmt.Sprintf("Focused context narrowed to %d files via %s (%d passes): %s", len(files), provider, len(passes), strings.Join(files, ", "))
 	} else if provider != "" {
-		summary = fmt.Sprintf("No relevant files found via %s.", provider)
+		summary = fmt.Sprintf("No relevant files found via %s (%d passes).", provider, len(passes))
 	}
 	return SearchResult{
 		CandidateFiles: files,
 		Summary:        summary,
 		HasGoModule:    hasGoModule,
 		Provider:       provider,
+		Passes:         passes,
 	}, nil
 }
 
@@ -132,6 +145,7 @@ func (s *LocalService) Outline(ctx context.Context, req OutlineRequest) (Outline
 	symbols := make(map[string][]string, len(req.Files))
 	var focused *SymbolMatch
 	focusedScore := -1
+	relatedCache := make(map[string][]string)
 
 	for _, rel := range req.Files {
 		select {
@@ -153,7 +167,12 @@ func (s *LocalService) Outline(ctx context.Context, req OutlineRequest) (Outline
 		baseScore := scoreFile(rel, string(content), tokens)
 		for _, symbol := range outline {
 			names = append(names, symbol.Name)
-			score := scoreSymbol(symbol, tokens, baseScore)
+			cacheKey := rel + "::" + symbol.Name
+			if _, ok := relatedCache[cacheKey]; !ok {
+				relatedFiles, _ := s.findRelatedFiles(ctx, req.Workspace, symbol)
+				relatedCache[cacheKey] = relatedFiles
+			}
+			score := scoreSymbol(symbol, tokens, baseScore, relatedCache[cacheKey])
 			if score > focusedScore {
 				s := symbol
 				s.Confidence = score
@@ -172,7 +191,17 @@ func (s *LocalService) Outline(ctx context.Context, req OutlineRequest) (Outline
 		focused = nil
 	}
 	if focused != nil {
+		relatedFiles := relatedCache[focused.Path+"::"+focused.Name]
+		if len(relatedFiles) > 0 {
+			summary += fmt.Sprintf(" Related files: %s.", strings.Join(relatedFiles, ", "))
+		}
 		summary += fmt.Sprintf(" Best symbol match: %s in %s.", focused.Name, focused.Path)
+		return OutlineResult{
+			Symbols:       symbols,
+			FocusedSymbol: focused,
+			RelatedFiles:  relatedFiles,
+			Summary:       summary,
+		}, nil
 	} else if len(symbols) > 0 {
 		summary += " No strong symbol match yet."
 	}
@@ -180,6 +209,7 @@ func (s *LocalService) Outline(ctx context.Context, req OutlineRequest) (Outline
 	return OutlineResult{
 		Symbols:       symbols,
 		FocusedSymbol: focused,
+		RelatedFiles:  nil,
 		Summary:       summary,
 	}, nil
 }
@@ -205,6 +235,7 @@ func (s *LocalService) Scan(ctx context.Context, req Request) (ContextSnapshot, 
 		CandidateFiles: search.CandidateFiles,
 		Symbols:        outline.Symbols,
 		FocusedSymbol:  outline.FocusedSymbol,
+		RelatedFiles:   outline.RelatedFiles,
 		Summary:        strings.TrimSpace(summary),
 		HasGoModule:    search.HasGoModule,
 	}, nil
@@ -234,6 +265,39 @@ func (s *LocalService) collectCandidates(ctx context.Context, workspace string, 
 	}
 	files, hasGoModule, err := s.scanWithWalk(ctx, workspace, tokens)
 	return files, hasGoModule, "workspace walk", err
+}
+
+func (s *LocalService) searchMultiPass(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, string, []SearchPass, error) {
+	primary, hasGoModule, provider, err := s.collectCandidates(ctx, workspace, tokens)
+	if err != nil {
+		return nil, false, "", nil, err
+	}
+
+	passes := []SearchPass{{
+		Name:           "primary",
+		Tokens:         append([]string(nil), tokens...),
+		Provider:       provider,
+		CandidateCount: len(primary),
+	}}
+
+	refinedTokens := deriveRefinedTokens(tokens, primary)
+	if len(refinedTokens) == 0 {
+		return primary, hasGoModule, provider, passes, nil
+	}
+
+	refined, refinedHasGoModule, refinedProvider, err := s.collectCandidates(ctx, workspace, refinedTokens)
+	if err != nil {
+		return nil, false, "", nil, err
+	}
+	passes = append(passes, SearchPass{
+		Name:           "refine_structural",
+		Tokens:         refinedTokens,
+		Provider:       refinedProvider,
+		CandidateCount: len(refined),
+	})
+
+	merged := mergeCandidateScores(primary, refined)
+	return merged, hasGoModule || refinedHasGoModule, joinProviders(provider, refinedProvider), passes, nil
 }
 
 func (s *LocalService) scanWithRipgrep(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, bool, error) {
@@ -445,6 +509,105 @@ func isWeakTaskToken(token string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func deriveRefinedTokens(tokens []string, scored []scoredFile) []string {
+	if len(scored) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		seen[token] = struct{}{}
+	}
+
+	refined := make([]string, 0, 8)
+	limit := min(3, len(scored))
+	for _, candidate := range scored[:limit] {
+		for _, part := range splitIdentifier(filepath.Base(candidate.Path)) {
+			if shouldAddRefinedToken(part, seen) {
+				seen[part] = struct{}{}
+				refined = append(refined, part)
+			}
+		}
+		for _, symbol := range candidate.Symbols {
+			for _, part := range splitIdentifier(symbol.Name) {
+				if shouldAddRefinedToken(part, seen) {
+					seen[part] = struct{}{}
+					refined = append(refined, part)
+				}
+			}
+		}
+	}
+	if len(refined) > 6 {
+		refined = refined[:6]
+	}
+	return refined
+}
+
+func shouldAddRefinedToken(token string, seen map[string]struct{}) bool {
+	token = strings.ToLower(strings.TrimSpace(token))
+	if len(token) < 3 || isWeakTaskToken(token) {
+		return false
+	}
+	_, exists := seen[token]
+	return !exists
+}
+
+func splitIdentifier(value string) []string {
+	replacer := strings.NewReplacer(".", " ", "_", " ", "-", " ", "/", " ")
+	value = replacer.Replace(value)
+	var builder strings.Builder
+	for i, r := range value {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			builder.WriteByte(' ')
+		}
+		builder.WriteRune(r)
+	}
+	parts := strings.Fields(strings.ToLower(builder.String()))
+	return slices.Compact(parts)
+}
+
+func mergeCandidateScores(primary, refined []scoredFile) []scoredFile {
+	merged := make(map[string]scoredFile, len(primary)+len(refined))
+	for _, candidate := range primary {
+		merged[candidate.Path] = candidate
+	}
+	for _, candidate := range refined {
+		existing, ok := merged[candidate.Path]
+		if !ok {
+			candidate.Score += 2
+			merged[candidate.Path] = candidate
+			continue
+		}
+		existing.Score += candidate.Score + 2
+		if len(existing.Symbols) == 0 && len(candidate.Symbols) > 0 {
+			existing.Symbols = candidate.Symbols
+		}
+		if existing.Kind > candidate.Kind {
+			existing.Kind = candidate.Kind
+		}
+		merged[candidate.Path] = existing
+	}
+
+	result := make([]scoredFile, 0, len(merged))
+	for _, candidate := range merged {
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func joinProviders(first, second string) string {
+	switch {
+	case first == "" && second == "":
+		return ""
+	case first == "":
+		return second
+	case second == "" || second == first:
+		return first
+	default:
+		return first + " -> " + second
 	}
 }
 
@@ -726,7 +889,7 @@ func lineNumber(content string, idx int) int {
 	return strings.Count(content[:idx], "\n") + 1
 }
 
-func scoreSymbol(symbol SymbolMatch, tokens []string, base int) int {
+func scoreSymbol(symbol SymbolMatch, tokens []string, base int, relatedFiles []string) int {
 	score := base
 	lowerName := strings.ToLower(symbol.Name)
 	lowerSnippet := strings.ToLower(symbol.Snippet)
@@ -745,6 +908,7 @@ func scoreSymbol(symbol SymbolMatch, tokens []string, base int) int {
 	if strings.HasSuffix(lowerPath, "_test.go") {
 		score -= 4
 	}
+	score += len(relatedFiles) * 3
 	return score
 }
 
@@ -764,6 +928,150 @@ func hasStructuralTokenMatch(symbol SymbolMatch, tokens []string) bool {
 		}
 	}
 	return false
+}
+
+func (s *LocalService) findRelatedFiles(ctx context.Context, workspace string, symbol SymbolMatch) ([]string, error) {
+	terms := referenceTerms(symbol.Name)
+	if len(terms) == 0 {
+		return nil, nil
+	}
+
+	if related, used, err := findRelatedFilesWithRipgrep(ctx, workspace, symbol.Path, terms); used || err != nil {
+		return related, err
+	}
+	return findRelatedFilesWithWalk(ctx, workspace, symbol.Path, terms)
+}
+
+func referenceTerms(name string) []string {
+	parts := strings.Split(name, ".")
+	terms := make([]string, 0, len(parts)+1)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if len(part) < 3 {
+			continue
+		}
+		terms = append(terms, part)
+	}
+	if len(terms) == 0 && len(name) >= 3 {
+		terms = append(terms, name)
+	}
+	slices.Sort(terms)
+	return slices.Compact(terms)
+}
+
+func findRelatedFilesWithRipgrep(ctx context.Context, workspace, origin string, terms []string) ([]string, bool, error) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		return nil, false, nil
+	}
+
+	patterns := make([]string, 0, len(terms))
+	for _, term := range terms {
+		patterns = append(patterns, `\b`+regexp.QuoteMeta(term)+`\b`)
+	}
+
+	cmd := exec.CommandContext(
+		ctx,
+		"rg",
+		"--files-with-matches",
+		"--smart-case",
+		strings.Join(patterns, "|"),
+		workspace,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false, nil
+	}
+
+	return normalizeRelatedFiles(strings.Split(strings.TrimSpace(string(out)), "\n"), workspace, origin), true, nil
+}
+
+func findRelatedFilesWithWalk(ctx context.Context, workspace, origin string, terms []string) ([]string, error) {
+	related := make([]string, 0, 3)
+	err := filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if d.IsDir() {
+			if strings.HasPrefix(d.Name(), ".") && path != workspace {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		info, statErr := d.Info()
+		if statErr != nil || info.Size() > 256*1024 {
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(workspace, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == origin {
+			return nil
+		}
+
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		lowerContent := strings.ToLower(string(content))
+		for _, term := range terms {
+			if strings.Contains(lowerContent, strings.ToLower(term)) {
+				related = append(related, rel)
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return clampRelatedFiles(related), nil
+}
+
+func normalizeRelatedFiles(lines []string, workspace, origin string) []string {
+	related := make([]string, 0, len(lines))
+	for _, line := range lines {
+		path := strings.TrimSpace(line)
+		if path == "" {
+			continue
+		}
+		rel, err := filepath.Rel(workspace, path)
+		if err != nil {
+			continue
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == origin {
+			continue
+		}
+		related = append(related, rel)
+	}
+	return clampRelatedFiles(related)
+}
+
+func clampRelatedFiles(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		if fileTypeBias(paths[i]) == fileTypeBias(paths[j]) {
+			return paths[i] < paths[j]
+		}
+		return fileTypeBias(paths[i]) > fileTypeBias(paths[j])
+	})
+	paths = slices.Compact(paths)
+	if len(paths) > 3 {
+		paths = paths[:3]
+	}
+	return paths
 }
 
 func classifyFile(path string) fileKind {

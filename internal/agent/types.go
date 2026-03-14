@@ -33,14 +33,34 @@ type RunInput struct {
 	Workspace string
 }
 
+type SearchToolState struct {
+	Request intelligence.Request
+	Result  *intelligence.SearchResult
+}
+
+type OutlineToolState struct {
+	Request intelligence.OutlineRequest
+	Result  *intelligence.OutlineResult
+}
+
+type ReadSymbolToolState struct {
+	Call   runtime.Call
+	Result *runtime.Result
+}
+
+type ValidationToolState struct {
+	Call   runtime.Call
+	Result *runtime.Result
+}
+
 type State struct {
-	Input            RunInput
-	Search           *intelligence.SearchResult
-	Outline          *intelligence.OutlineResult
-	SymbolReadResult *runtime.Result
-	ValidationResult *runtime.Result
-	MemorySaved      bool
-	Steps            int
+	Input          RunInput
+	SearchTool     *SearchToolState
+	OutlineTool    *OutlineToolState
+	ReadSymbolTool *ReadSymbolToolState
+	ValidationTool *ValidationToolState
+	MemorySaved    bool
+	Steps          int
 }
 
 type ActionKind string

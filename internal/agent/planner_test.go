@@ -16,9 +16,11 @@ func TestPlannerFlow(t *testing.T) {
 	}
 
 	second := planner.Next(State{
-		Search: &intelligence.SearchResult{
-			CandidateFiles: []string{"go.mod"},
-			HasGoModule:    true,
+		SearchTool: &SearchToolState{
+			Result: &intelligence.SearchResult{
+				CandidateFiles: []string{"go.mod"},
+				HasGoModule:    true,
+			},
 		},
 	})
 	if second.Kind != ActionOutlineContext {
@@ -26,12 +28,16 @@ func TestPlannerFlow(t *testing.T) {
 	}
 
 	third := planner.Next(State{
-		Search: &intelligence.SearchResult{
-			CandidateFiles: []string{"go.mod"},
-			HasGoModule:    true,
+		SearchTool: &SearchToolState{
+			Result: &intelligence.SearchResult{
+				CandidateFiles: []string{"go.mod"},
+				HasGoModule:    true,
+			},
 		},
-		Outline: &intelligence.OutlineResult{
-			FocusedSymbol: &intelligence.SymbolMatch{Path: "internal/auth/middleware.go", Name: "AuthMiddleware"},
+		OutlineTool: &OutlineToolState{
+			Result: &intelligence.OutlineResult{
+				FocusedSymbol: &intelligence.SymbolMatch{Path: "internal/auth/middleware.go", Name: "AuthMiddleware"},
+			},
 		},
 	})
 	if third.Kind != ActionInspectSymbol || third.Symbol != "AuthMiddleware" {
@@ -39,45 +45,57 @@ func TestPlannerFlow(t *testing.T) {
 	}
 
 	fourth := planner.Next(State{
-		Search: &intelligence.SearchResult{
-			CandidateFiles: []string{"go.mod"},
-			HasGoModule:    true,
+		SearchTool: &SearchToolState{
+			Result: &intelligence.SearchResult{
+				CandidateFiles: []string{"go.mod"},
+				HasGoModule:    true,
+			},
 		},
-		Outline: &intelligence.OutlineResult{
-			FocusedSymbol: &intelligence.SymbolMatch{Path: "internal/auth/middleware.go", Name: "AuthMiddleware"},
+		OutlineTool: &OutlineToolState{
+			Result: &intelligence.OutlineResult{
+				FocusedSymbol: &intelligence.SymbolMatch{Path: "internal/auth/middleware.go", Name: "AuthMiddleware"},
+			},
 		},
-		SymbolReadResult: &runtime.Result{Tool: runtime.ToolReadSymbol, Summary: "ok"},
+		ReadSymbolTool: &ReadSymbolToolState{Result: &runtime.Result{Tool: runtime.ToolReadSymbol, Summary: "ok"}},
 	})
 	if fourth.Kind != ActionRunCommand || fourth.Command != "go test ./..." {
 		t.Fatalf("expected validation command, got %#v", fourth)
 	}
 
 	fifth := planner.Next(State{
-		Search: &intelligence.SearchResult{
-			CandidateFiles: []string{"go.mod"},
-			HasGoModule:    true,
+		SearchTool: &SearchToolState{
+			Result: &intelligence.SearchResult{
+				CandidateFiles: []string{"go.mod"},
+				HasGoModule:    true,
+			},
 		},
-		Outline: &intelligence.OutlineResult{
-			FocusedSymbol: &intelligence.SymbolMatch{Path: "internal/auth/middleware.go", Name: "AuthMiddleware"},
+		OutlineTool: &OutlineToolState{
+			Result: &intelligence.OutlineResult{
+				FocusedSymbol: &intelligence.SymbolMatch{Path: "internal/auth/middleware.go", Name: "AuthMiddleware"},
+			},
 		},
-		SymbolReadResult: &runtime.Result{Tool: runtime.ToolReadSymbol, Summary: "ok"},
-		ValidationResult: &runtime.Result{Tool: runtime.ToolShell, Summary: "ok"},
+		ReadSymbolTool: &ReadSymbolToolState{Result: &runtime.Result{Tool: runtime.ToolReadSymbol, Summary: "ok"}},
+		ValidationTool: &ValidationToolState{Result: &runtime.Result{Tool: runtime.ToolShell, Summary: "ok"}},
 	})
 	if fifth.Kind != ActionSaveMemory {
 		t.Fatalf("expected save memory, got %q", fifth.Kind)
 	}
 
 	sixth := planner.Next(State{
-		Search: &intelligence.SearchResult{
-			CandidateFiles: []string{"go.mod"},
-			HasGoModule:    true,
+		SearchTool: &SearchToolState{
+			Result: &intelligence.SearchResult{
+				CandidateFiles: []string{"go.mod"},
+				HasGoModule:    true,
+			},
 		},
-		Outline: &intelligence.OutlineResult{
-			FocusedSymbol: &intelligence.SymbolMatch{Path: "internal/auth/middleware.go", Name: "AuthMiddleware"},
+		OutlineTool: &OutlineToolState{
+			Result: &intelligence.OutlineResult{
+				FocusedSymbol: &intelligence.SymbolMatch{Path: "internal/auth/middleware.go", Name: "AuthMiddleware"},
+			},
 		},
-		SymbolReadResult: &runtime.Result{Tool: runtime.ToolReadSymbol, Summary: "ok"},
-		ValidationResult: &runtime.Result{Tool: runtime.ToolShell, Summary: "ok"},
-		MemorySaved:      true,
+		ReadSymbolTool: &ReadSymbolToolState{Result: &runtime.Result{Tool: runtime.ToolReadSymbol, Summary: "ok"}},
+		ValidationTool: &ValidationToolState{Result: &runtime.Result{Tool: runtime.ToolShell, Summary: "ok"}},
+		MemorySaved:    true,
 	})
 	if sixth.Kind != ActionFinish {
 		t.Fatalf("expected finish, got %q", sixth.Kind)
@@ -88,10 +106,10 @@ func TestPlannerSkipsInspectWithoutStrongSymbol(t *testing.T) {
 	planner := NewPlanner()
 
 	decision := planner.Next(State{
-		Search: &intelligence.SearchResult{
+		SearchTool: &SearchToolState{Result: &intelligence.SearchResult{
 			CandidateFiles: []string{"internal/app/main.go"},
-		},
-		Outline: &intelligence.OutlineResult{},
+		}},
+		OutlineTool: &OutlineToolState{Result: &intelligence.OutlineResult{}},
 	})
 	if decision.Kind != ActionRunCommand {
 		t.Fatalf("expected validation without symbol inspect, got %#v", decision)

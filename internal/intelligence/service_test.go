@@ -150,11 +150,40 @@ func TestSearch(t *testing.T) {
 	if result.Provider == "" {
 		t.Fatal("expected search provider to be reported")
 	}
+	if len(result.Passes) == 0 {
+		t.Fatal("expected search passes to be recorded")
+	}
 	if len(result.CandidateFiles) < 3 {
 		t.Fatalf("expected ranked candidates, got %#v", result.CandidateFiles)
 	}
 	if result.CandidateFiles[0] != "internal/auth/middleware.go" {
 		t.Fatalf("expected source file first, got %#v", result.CandidateFiles)
+	}
+}
+
+func TestSearchUsesMultiplePasses(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"go.mod":                    "module example.com/test\n\ngo 1.24.0\n",
+		"internal/agent/planner.go": "package agent\n\nfunc chooseValidationCommand() string { return \"go test ./...\" }\n",
+		"internal/agent/agent.go":   "package agent\n\nfunc runValidation() string { return chooseValidationCommand() }\n",
+		"cmd/projectkitty/main.go":  "package main\n\nfunc main() { _ = \"validation\" }\n",
+	})
+
+	result, err := New().Search(context.Background(), Request{
+		Task:      "inspect planner validation command",
+		Workspace: dir,
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(result.Passes) < 2 {
+		t.Fatalf("expected multiple search passes, got %#v", result.Passes)
+	}
+	if result.Passes[1].Name != "refine_structural" {
+		t.Fatalf("unexpected second pass: %#v", result.Passes[1])
 	}
 }
 
@@ -333,5 +362,63 @@ func TestOutlineUsesTreeSitterForJavaScript(t *testing.T) {
 	}
 	if !slices.Contains(result.Symbols["src/auth.js"], "AuthService.middleware") {
 		t.Fatalf("expected class method in symbol list, got %#v", result.Symbols["src/auth.js"])
+	}
+}
+
+func TestOutlineUsesTreeSitterForJava(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"src/AuthService.java": "class AuthService {\n  void middleware() {}\n}\n\nclass AuthFactory {\n  static void createAuthMiddleware() {}\n}\n",
+	})
+
+	result, err := New().Outline(context.Background(), OutlineRequest{
+		Task:      "auth middleware",
+		Workspace: dir,
+		Files:     []string{"src/AuthService.java"},
+	})
+	if err != nil {
+		t.Fatalf("outline: %v", err)
+	}
+	if result.FocusedSymbol == nil {
+		t.Fatal("expected focused symbol")
+	}
+	if result.FocusedSymbol.Name != "createAuthMiddleware" {
+		t.Fatalf("unexpected focused symbol: %#v", result.FocusedSymbol)
+	}
+	if !slices.Contains(result.Symbols["src/AuthService.java"], "AuthService") {
+		t.Fatalf("expected class symbol in outline, got %#v", result.Symbols["src/AuthService.java"])
+	}
+}
+
+func TestOutlineFindsRelatedFilesForFocusedSymbol(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"go.mod":                    "module example.com/test\n\ngo 1.24.0\n",
+		"internal/agent/planner.go": "package agent\n\nfunc chooseValidationCommand() string {\n\treturn \"go test ./...\"\n}\n",
+		"internal/agent/agent.go":   "package agent\n\nfunc run() string {\n\treturn chooseValidationCommand()\n}\n",
+		"cmd/projectkitty/main.go":  "package main\n\nfunc main() {\n\t_ = \"chooseValidationCommand\"\n}\n",
+		"docs/notes.md":             "chooseValidationCommand notes\n",
+	})
+
+	result, err := New().Outline(context.Background(), OutlineRequest{
+		Task:      "inspect planner validation command",
+		Workspace: dir,
+		Files:     []string{"internal/agent/planner.go", "internal/agent/agent.go", "cmd/projectkitty/main.go", "docs/notes.md"},
+	})
+	if err != nil {
+		t.Fatalf("outline: %v", err)
+	}
+	if result.FocusedSymbol == nil || result.FocusedSymbol.Name != "chooseValidationCommand" {
+		t.Fatalf("unexpected focused symbol: %#v", result.FocusedSymbol)
+	}
+	if !slices.Contains(result.RelatedFiles, "internal/agent/agent.go") {
+		t.Fatalf("expected related file, got %#v", result.RelatedFiles)
+	}
+	if !strings.Contains(result.Summary, "Related files:") {
+		t.Fatalf("expected related files summary, got %q", result.Summary)
 	}
 }

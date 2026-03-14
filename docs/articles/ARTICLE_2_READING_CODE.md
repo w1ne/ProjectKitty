@@ -59,11 +59,13 @@ That's a retrieval problem. Not vector search, not semantic magic — a discipli
 For the current useful version, that pipeline is:
 
 1. tokenize the task
-2. search the repository cheaply
-3. score files by filename and content matches
-4. run an outline pass over likely files
-5. optionally read one focused symbol
-6. return a compact snapshot
+2. run a cheap first search pass
+3. run a refined structural search pass
+4. rank files by filename, content, and structural evidence
+5. run an outline pass over likely files
+6. trace a few nearby related files around the strongest symbol
+7. optionally read one focused symbol
+8. return a compact snapshot
 
 That's already enough to make Whiskers behave very differently from a plain file dump.
 
@@ -89,7 +91,7 @@ flowchart LR
     L --> P[Planner receives snapshot]
 ```
 
-This is what Whiskers does now. It tries a cheap `ripgrep`-style search pass first, then falls back to Git-aware file discovery when available, and only then uses a generic workspace walk. The important part is not just the fallback order. Whiskers also reports which search backend it used, so the loop is more inspectable instead of hiding retrieval behind one vague "context" step. That keeps the retrieval layer closer to the pattern we actually saw in the research: generic file tools plus ignore-aware filtering, not product-specific path exclusions buried in the core reader.
+This is what Whiskers does now. It tries a cheap `ripgrep`-style search pass first, then does a refined structural pass using names it discovered in the first slice, then falls back to Git-aware file discovery or a generic workspace walk when needed. The important part is not just the fallback order. Whiskers also reports which search backend it used and how many passes ran, so the loop is more inspectable instead of hiding retrieval behind one vague "context" step. That keeps the retrieval layer closer to the pattern we actually saw in the research: generic file tools plus ignore-aware filtering, not product-specific path exclusions buried in the core reader.
 
 ---
 
@@ -105,12 +107,14 @@ Even a lightweight pass gives the planner far better signals:
 - is the target a `func`, a `type`, an interface
 - which file looks like implementation and which looks like wiring
 
-In Whiskers' current implementation, symbol extraction is syntax-aware across the languages we care about first: Go, JavaScript, TypeScript, Python, and Bash. Under the hood it uses a single Tree-sitter-backed reader with per-language grammars, then falls back to regex extraction only for unsupported files. So instead of receiving a blind file path, the planner gets:
+In Whiskers' current implementation, symbol extraction is syntax-aware across the languages we care about first: Go, Java, JavaScript, TypeScript, Python, and Bash. Under the hood it uses a single Tree-sitter-backed reader with per-language grammars, then falls back to regex extraction only for unsupported files. So instead of receiving a blind file path, the planner gets:
 
 - `internal/agent/planner.go`
 - symbols: `chooseValidationCommand`, `NewPlanner`, `DefaultPlanner.Next`
 
 That small upgrade changes the next action from "maybe read the whole file" to "read this specific symbol." One focused read instead of a fishing expedition.
+
+Whiskers now also does one small but important thing beyond pure ranking: once it has a strong symbol match, it traces a few nearby related files that reference the same symbol. That is not deep call-graph analysis yet, but it gives the planner a better local neighborhood around the main target.
 
 Just as important, Whiskers now refuses weak matches. If the outline stage cannot produce a strong structural hit, it says so and stops there. That's a real behavior improvement over the typical agent failure mode of reading something nearby and acting confident about it.
 
@@ -135,8 +139,8 @@ That's exactly how projectKitty's `Scan` interface is shaped. It returns a `Cont
 In the current repo, that looks like this:
 
 ```text
-[observed] Search results: Focused context narrowed to 5 files via ripgrep: internal/agent/planner.go, cmd/projectkitty/main.go, internal/agent/agent.go, internal/agent/types.go, internal/intelligence/service.go
-[observed] Outline results: Outlined 5 candidate files. Best symbol match: chooseValidationCommand in internal/agent/planner.go.
+[observed] Search results: Focused context narrowed to 5 files via ripgrep (2 passes): internal/agent/planner.go, internal/agent/agent.go, cmd/projectkitty/main.go, internal/agent/types.go, internal/intelligence/service.go
+[observed] Outline results: Outlined 5 candidate files. Related files: internal/agent/agent.go, cmd/projectkitty/main.go. Best symbol match: chooseValidationCommand in internal/agent/planner.go.
 [observed] Focused symbol: Read symbol chooseValidationCommand from internal/agent/planner.go.
 ```
 
@@ -176,7 +180,7 @@ Today that structural reader is Tree-sitter-backed for the supported languages a
 This is also where Whiskers now lines up much better with the coding-agent patterns we studied:
 
 - Claude research strongly supports syntax-aware code reading as the right direction. Our reverse-engineering points to structural code selection and language-aware parsing, so Whiskers' move toward syntax-aware symbol extraction is evidence-backed.
-- Codex research strongly supports cleaner explicit tool boundaries. The main lesson there is not a specific parser, but a cleaner split between "find things" and "read things." Whiskers' `Search` / `Outline` / `Read symbol` shape follows that pattern.
+- Codex research strongly supports cleaner explicit tool boundaries. The main lesson there is not a specific parser, but a cleaner split between "find things" and "read things." Whiskers' `Search` / `Outline` / `Read symbol` shape follows that pattern, and the agent state now models those as explicit typed tool stages rather than raw blobs.
 - Gemini research strongly supports observable staged execution. Gemini exposes a typed event stream with named turn states. Whiskers is closer to that style than before because its stages are now explicit, but it is not yet equivalent to Gemini's typed state-machine design.
 
 Those comparisons matter, but they should be read carefully. They are not claims that projectKitty has reached Claude, Codex, or Gemini implementation depth. They are narrower claims:
@@ -217,7 +221,9 @@ By the end of this article, projectKitty has a working code-intelligence subsyst
 - tokenize the task into search terms
 - search the workspace cheaply and fall back safely
 - rank candidate files
+- run a structural refinement pass before final ranking
 - build a syntax-aware symbol outline for likely files
+- trace a few nearby related files for the strongest symbol
 - read a focused symbol only when the match is strong enough
 - return `No strong symbol match yet` when the repo does not justify a focused read
 - hand the planner a focused snapshot
@@ -245,6 +251,32 @@ The series order matters.
 Before we let projectKitty run commands, edit files, or manage long sessions, it needs to see the codebase clearly enough to choose sensible actions. Skip this step and execution just makes bad decisions faster — confidently, repeatedly, at scale.
 
 Craftydraft didn't have this problem because it never acted on anything. projectKitty will. Whiskers is what keeps that from becoming dangerous.
+
+---
+
+## 10. Current Weaknesses
+
+Article 2 is useful, but it is not complete. The important weaknesses are clear:
+
+- ranking is still mostly lexical and structural, not deeply semantic
+- cross-file reasoning is still shallow; Whiskers now finds a few nearby related files, but it still does not trace call graphs, imports, or data flow in a serious way
+- unsupported languages still fall back to regex extraction
+- repository walking is generic now, but the final fallback is still simpler than a fully indexed code-navigation system
+- the event model is clearer than before, but still much simpler than Gemini's typed turn-state system
+- the tool surface is cleaner now, but still not as explicitly separated and reusable as a more mature Codex-style architecture
+- syntax-aware extraction is good enough for this slice, but still not the same thing as full semantic understanding
+
+Those are not reasons to discard the subsystem. They are the reasons later articles still matter.
+
+The practical follow-up list is straightforward:
+
+- improve ranking with stronger structural evidence
+- add richer code relationship tracing
+- expand syntax-aware support across more languages and constructs
+- make retrieval capable of broadening or refining itself when confidence is low
+- keep tightening the tool and event boundaries around the subsystem
+
+That is the path from a useful code-reading layer to a much stronger one.
 
 ---
 

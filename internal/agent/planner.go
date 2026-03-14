@@ -13,7 +13,7 @@ func NewPlanner() *DefaultPlanner {
 }
 
 func (p *DefaultPlanner) Next(state State) Decision {
-	if state.Search == nil {
+	if state.SearchTool == nil || state.SearchTool.Result == nil {
 		return Decision{
 			Kind:   ActionSearchRepository,
 			Title:  "Search repository",
@@ -21,7 +21,7 @@ func (p *DefaultPlanner) Next(state State) Decision {
 		}
 	}
 
-	if state.Outline == nil {
+	if state.OutlineTool == nil || state.OutlineTool.Result == nil {
 		return Decision{
 			Kind:   ActionOutlineContext,
 			Title:  "Outline candidate files",
@@ -29,17 +29,17 @@ func (p *DefaultPlanner) Next(state State) Decision {
 		}
 	}
 
-	if state.Outline.FocusedSymbol != nil && state.SymbolReadResult == nil {
+	if state.OutlineTool.Result.FocusedSymbol != nil && (state.ReadSymbolTool == nil || state.ReadSymbolTool.Result == nil) {
 		return Decision{
 			Kind:   ActionInspectSymbol,
 			Title:  "Inspect focused symbol",
 			Detail: "Read the smallest useful symbol before running repository validation.",
-			Path:   state.Outline.FocusedSymbol.Path,
-			Symbol: state.Outline.FocusedSymbol.Name,
+			Path:   state.OutlineTool.Result.FocusedSymbol.Path,
+			Symbol: state.OutlineTool.Result.FocusedSymbol.Name,
 		}
 	}
 
-	if state.ValidationResult == nil {
+	if state.ValidationTool == nil || state.ValidationTool.Result == nil {
 		return Decision{
 			Kind:    ActionRunCommand,
 			Title:   "Run safe validation",
@@ -64,11 +64,14 @@ func (p *DefaultPlanner) Next(state State) Decision {
 }
 
 func chooseValidationCommand(state State) string {
-	if state.Search.HasGoModule {
+	if state.SearchTool != nil && state.SearchTool.Result != nil && state.SearchTool.Result.HasGoModule {
 		return "go test ./..."
 	}
 
-	for _, file := range state.Search.CandidateFiles {
+	if state.SearchTool == nil || state.SearchTool.Result == nil {
+		return "git status --short"
+	}
+	for _, file := range state.SearchTool.Result.CandidateFiles {
 		if strings.EqualFold(file, "go.mod") || strings.HasSuffix(file, "/go.mod") {
 			return "go test ./..."
 		}
