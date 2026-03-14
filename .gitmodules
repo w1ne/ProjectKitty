@@ -1,0 +1,3 @@
+[submodule "implementation/projectkitty"]
+	path = implementation/projectkitty
+	url = git@github.com:w1ne/ProjectKitty.git
