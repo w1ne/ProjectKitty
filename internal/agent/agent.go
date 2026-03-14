@@ -53,19 +53,56 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 			}
 
 			switch decision.Kind {
-			case ActionGatherContext:
-				snapshot, err := a.intelligence.Scan(ctx, intelligence.Request{
+			case ActionSearchRepository:
+				search, err := a.intelligence.Search(ctx, intelligence.Request{
 					Task:      input.Task,
 					Workspace: input.Workspace,
 				})
 				if err != nil {
-					events <- newErrorEvent(step, "Gather context", err)
+					events <- newErrorEvent(step, "Search repository", err)
 					return
 				}
-				state.Context = &snapshot
-				events <- newEvent(EventObserved, step, "Context gathered", snapshot.Summary)
-				if err := a.memory.RecordSessionEvent(sessionID, "context", snapshot.Summary); err != nil {
-					events <- newErrorEvent(step, "Record context", err)
+				state.Search = &search
+				events <- newEvent(EventObserved, step, "Search results", search.Summary)
+				if err := a.memory.RecordSessionEvent(sessionID, "search", search.Summary); err != nil {
+					events <- newErrorEvent(step, "Record search", err)
+					return
+				}
+
+			case ActionOutlineContext:
+				outline, err := a.intelligence.Outline(ctx, intelligence.OutlineRequest{
+					Task:      input.Task,
+					Workspace: input.Workspace,
+					Files:     state.Search.CandidateFiles,
+				})
+				if err != nil {
+					events <- newErrorEvent(step, "Outline context", err)
+					return
+				}
+				state.Outline = &outline
+				events <- newEvent(EventObserved, step, "Outline results", outline.Summary)
+				if err := a.memory.RecordSessionEvent(sessionID, "outline", outline.Summary); err != nil {
+					events <- newErrorEvent(step, "Record outline", err)
+					return
+				}
+
+			case ActionInspectSymbol:
+				call := runtime.Call{
+					Tool:      runtime.ToolReadSymbol,
+					Workspace: input.Workspace,
+					Path:      decision.Path,
+					Symbol:    decision.Symbol,
+				}
+				events <- newEvent(EventAction, step, "Runtime action", fmt.Sprintf("Read symbol %s from %s", decision.Symbol, decision.Path))
+				result, err := a.runtime.Execute(ctx, call)
+				if err != nil {
+					events <- newErrorEvent(step, "Read symbol", err)
+					return
+				}
+				state.SymbolReadResult = &result
+				events <- newEvent(EventObserved, step, "Focused symbol", result.Summary)
+				if err := a.memory.RecordSessionEvent(sessionID, "read_symbol", result.Summary); err != nil {
+					events <- newErrorEvent(step, "Record symbol read", err)
 					return
 				}
 
@@ -81,7 +118,7 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 					events <- newErrorEvent(step, "Execute command", err)
 					return
 				}
-				state.LastToolResult = &result
+				state.ValidationResult = &result
 				events <- newEvent(EventObserved, step, "Runtime result", result.Summary)
 				if err := a.memory.RecordSessionEvent(sessionID, "runtime", result.Summary); err != nil {
 					events <- newErrorEvent(step, "Record runtime", err)
@@ -119,11 +156,17 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 
 func summarizeFact(state State) string {
 	parts := make([]string, 0, 3)
-	if state.Context != nil {
-		parts = append(parts, "Candidates: "+strings.Join(state.Context.CandidateFiles, ", "))
+	if state.Search != nil {
+		parts = append(parts, "Candidates: "+strings.Join(state.Search.CandidateFiles, ", "))
 	}
-	if state.LastToolResult != nil {
-		parts = append(parts, "Validation: "+state.LastToolResult.Summary)
+	if state.Outline != nil && state.Outline.FocusedSymbol != nil {
+		parts = append(parts, "Best symbol: "+state.Outline.FocusedSymbol.Name+" in "+state.Outline.FocusedSymbol.Path)
+	}
+	if state.SymbolReadResult != nil {
+		parts = append(parts, "Focused read: "+state.SymbolReadResult.Summary)
+	}
+	if state.ValidationResult != nil {
+		parts = append(parts, "Validation: "+state.ValidationResult.Summary)
 	}
 	if len(parts) == 0 {
 		return "No durable facts captured."

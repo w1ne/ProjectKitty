@@ -50,11 +50,31 @@ func TestAgentRunPersistsSessionAndFacts(t *testing.T) {
 	}
 
 	var sawMemory bool
+	var sawFocusedRead bool
+	var sawSearch bool
+	var sawOutline bool
 	for _, event := range events {
+		if event.Kind == EventObserved && event.Title == "Search results" {
+			sawSearch = true
+		}
+		if event.Kind == EventObserved && event.Title == "Outline results" {
+			sawOutline = true
+		}
+		if event.Kind == EventObserved && event.Title == "Focused symbol" {
+			sawFocusedRead = true
+		}
 		if event.Kind == EventMemory {
 			sawMemory = true
-			break
 		}
+	}
+	if !sawSearch {
+		t.Fatal("expected search event")
+	}
+	if !sawOutline {
+		t.Fatal("expected outline event")
+	}
+	if !sawFocusedRead {
+		t.Fatal("expected focused symbol inspection event")
 	}
 	if !sawMemory {
 		t.Fatal("expected durable memory update event")
@@ -67,7 +87,7 @@ func TestAgentRunPersistsSessionAndFacts(t *testing.T) {
 	if len(facts) == 0 {
 		t.Fatal("expected persisted fact")
 	}
-	if !strings.Contains(facts[len(facts)-1].Summary, "go test ./...") {
+	if !strings.Contains(facts[len(facts)-1].Summary, "go test ./...") || !strings.Contains(facts[len(facts)-1].Summary, "Read symbol AuthMiddleware") {
 		t.Fatalf("unexpected fact summary: %q", facts[len(facts)-1].Summary)
 	}
 
@@ -78,6 +98,93 @@ func TestAgentRunPersistsSessionAndFacts(t *testing.T) {
 	}
 	if len(entries) < 2 {
 		t.Fatalf("expected session metadata and log, got %d files", len(entries))
+	}
+}
+
+func TestAgentRunSkipsFocusedReadWhenNoStrongMatch(t *testing.T) {
+	dir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/projectkittytest\n\ngo 1.24.0\n")
+	writeTestFile(t, filepath.Join(dir, "README.md"), "# generic project\n")
+	writeTestFile(t, filepath.Join(dir, "internal", "app", "server.go"), "package app\n\nfunc Serve() {}\n")
+
+	store, err := memory.NewStore(dir)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	app := New(
+		NewPlanner(),
+		intelligence.New(),
+		runtime.New(runtime.Policy{
+			ApprovalMode:    "test",
+			AllowedCommands: []string{"go test ./...", "git status --short"},
+		}),
+		store,
+	)
+
+	var events []Event
+	for event := range app.Run(context.Background(), RunInput{
+		Task:      "inspect auth middleware and validate",
+		Workspace: dir,
+	}) {
+		events = append(events, event)
+	}
+
+	var sawOutline bool
+	var sawFocusedRead bool
+	for _, event := range events {
+		if event.Kind == EventObserved && event.Title == "Outline results" {
+			sawOutline = true
+			if !strings.Contains(event.Detail, "No strong symbol match yet") {
+				t.Fatalf("unexpected outline detail: %q", event.Detail)
+			}
+		}
+		if event.Kind == EventObserved && event.Title == "Focused symbol" {
+			sawFocusedRead = true
+		}
+	}
+	if !sawOutline {
+		t.Fatal("expected outline event")
+	}
+	if sawFocusedRead {
+		t.Fatal("did not expect focused symbol event")
+	}
+}
+
+func TestAgentRunFallsBackToGitStatusWithoutGoModule(t *testing.T) {
+	dir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(dir, "README.md"), "# generic project\n")
+	writeTestFile(t, filepath.Join(dir, "internal", "auth", "middleware.go"), "package auth\n\nfunc AuthMiddleware() {}\n")
+
+	store, err := memory.NewStore(dir)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	app := New(
+		NewPlanner(),
+		intelligence.New(),
+		runtime.New(runtime.Policy{
+			ApprovalMode:    "test",
+			AllowedCommands: []string{"go test ./...", "git status --short"},
+		}),
+		store,
+	)
+
+	var sawGitStatus bool
+	for event := range app.Run(context.Background(), RunInput{
+		Task:      "inspect auth middleware",
+		Workspace: dir,
+	}) {
+		if event.Kind == EventAction && event.Detail == "git status --short" {
+			sawGitStatus = true
+		}
+	}
+
+	if !sawGitStatus {
+		t.Fatal("expected git status fallback without go.mod")
 	}
 }
 

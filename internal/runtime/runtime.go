@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -16,9 +17,10 @@ import (
 type Tool string
 
 const (
-	ToolShell     Tool = "shell"
-	ToolReadFile  Tool = "read_file"
-	ToolListFiles Tool = "list_files"
+	ToolShell      Tool = "shell"
+	ToolReadFile   Tool = "read_file"
+	ToolReadSymbol Tool = "read_symbol"
+	ToolListFiles  Tool = "list_files"
 )
 
 type Policy struct {
@@ -32,6 +34,7 @@ type Call struct {
 	Workspace string
 	Command   string
 	Path      string
+	Symbol    string
 	Limit     int
 }
 
@@ -58,6 +61,8 @@ func (r *Runtime) Execute(ctx context.Context, call Call) (Result, error) {
 		return r.runShell(ctx, call)
 	case ToolReadFile:
 		return r.readFile(call)
+	case ToolReadSymbol:
+		return r.readSymbol(call)
 	case ToolListFiles:
 		return r.listFiles(call)
 	default:
@@ -129,6 +134,24 @@ func (r *Runtime) readFile(call Call) (Result, error) {
 	}, nil
 }
 
+func (r *Runtime) readSymbol(call Call) (Result, error) {
+	content, err := os.ReadFile(filepath.Join(call.Workspace, call.Path))
+	if err != nil {
+		return Result{}, err
+	}
+
+	snippet := extractSymbolSnippet(string(content), call.Symbol)
+	if snippet == "" {
+		return Result{}, fmt.Errorf("symbol %q not found in %s", call.Symbol, call.Path)
+	}
+
+	return Result{
+		Tool:    ToolReadSymbol,
+		Summary: fmt.Sprintf("Read symbol %s from %s.", call.Symbol, call.Path),
+		Output:  snippet,
+	}, nil
+}
+
 func (r *Runtime) listFiles(call Call) (Result, error) {
 	limit := call.Limit
 	if limit <= 0 {
@@ -190,4 +213,45 @@ func (r *Runtime) checkPolicy(command string) error {
 	}
 
 	return fmt.Errorf("command requires approval in %s mode: %s", r.policy.ApprovalMode, normalized)
+}
+
+func extractSymbolSnippet(content, symbol string) string {
+	pattern := fmt.Sprintf(`(?m)^(\s*)(?:func\s+(?:\([^)]+\)\s*)?%s\b|type\s+%s\b)`, regexp.QuoteMeta(symbol), regexp.QuoteMeta(symbol))
+	matcher := regexp.MustCompile(pattern)
+	loc := matcher.FindStringIndex(content)
+	if loc == nil {
+		return ""
+	}
+
+	start := loc[0]
+	end := len(content)
+	rest := content[loc[1]:]
+	if next := matcher.FindStringIndex(rest); next != nil {
+		end = loc[1] + next[0]
+	}
+
+	if blockStart := strings.Index(content[start:end], "{"); blockStart >= 0 {
+		open := start + blockStart
+		if close := matchBrace(content, open); close > open {
+			end = close + 1
+		}
+	}
+
+	return strings.TrimSpace(content[start:end])
+}
+
+func matchBrace(content string, open int) int {
+	depth := 0
+	for i := open; i < len(content); i++ {
+		switch content[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }

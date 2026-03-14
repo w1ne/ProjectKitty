@@ -13,15 +13,33 @@ func NewPlanner() *DefaultPlanner {
 }
 
 func (p *DefaultPlanner) Next(state State) Decision {
-	if state.Context == nil {
+	if state.Search == nil {
 		return Decision{
-			Kind:   ActionGatherContext,
-			Title:  "Gather focused context",
-			Detail: "Use code intelligence to find the smallest useful repository slice.",
+			Kind:   ActionSearchRepository,
+			Title:  "Search repository",
+			Detail: "Use cheap search to find the smallest useful repository slice.",
 		}
 	}
 
-	if state.LastToolResult == nil {
+	if state.Outline == nil {
+		return Decision{
+			Kind:   ActionOutlineContext,
+			Title:  "Outline candidate files",
+			Detail: "Extract top-level symbols from likely files before reading code.",
+		}
+	}
+
+	if state.Outline.FocusedSymbol != nil && state.SymbolReadResult == nil {
+		return Decision{
+			Kind:   ActionInspectSymbol,
+			Title:  "Inspect focused symbol",
+			Detail: "Read the smallest useful symbol before running repository validation.",
+			Path:   state.Outline.FocusedSymbol.Path,
+			Symbol: state.Outline.FocusedSymbol.Name,
+		}
+	}
+
+	if state.ValidationResult == nil {
 		return Decision{
 			Kind:    ActionRunCommand,
 			Title:   "Run safe validation",
@@ -46,11 +64,11 @@ func (p *DefaultPlanner) Next(state State) Decision {
 }
 
 func chooseValidationCommand(state State) string {
-	if state.Context.HasGoModule {
+	if state.Search.HasGoModule {
 		return "go test ./..."
 	}
 
-	for _, file := range state.Context.CandidateFiles {
+	for _, file := range state.Search.CandidateFiles {
 		if strings.EqualFold(file, "go.mod") || strings.HasSuffix(file, "/go.mod") {
 			return "go test ./..."
 		}

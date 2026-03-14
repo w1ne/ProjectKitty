@@ -263,4 +263,6 @@ To keep the project logical, each article will add one major capability:
 
 In Article 2, we will build the code-reading layer. That means combining fast repository search with syntax-aware extraction so the agent can answer questions like "where is this implemented?" and "show me only the function that matters" without flooding the model with irrelevant context.
 
+Article 2 is now available in this series as [`ARTICLE_2_READING_CODE.md`](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/docs/articles/ARTICLE_2_READING_CODE.md).
+
 This article was prepared by Andrii Shylenko for Entropora, Inc.

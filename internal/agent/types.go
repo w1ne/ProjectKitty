@@ -34,20 +34,24 @@ type RunInput struct {
 }
 
 type State struct {
-	Input          RunInput
-	Context        *intelligence.ContextSnapshot
-	LastToolResult *runtime.Result
-	MemorySaved    bool
-	Steps          int
+	Input            RunInput
+	Search           *intelligence.SearchResult
+	Outline          *intelligence.OutlineResult
+	SymbolReadResult *runtime.Result
+	ValidationResult *runtime.Result
+	MemorySaved      bool
+	Steps            int
 }
 
 type ActionKind string
 
 const (
-	ActionGatherContext ActionKind = "gather_context"
-	ActionRunCommand    ActionKind = "run_command"
-	ActionSaveMemory    ActionKind = "save_memory"
-	ActionFinish        ActionKind = "finish"
+	ActionSearchRepository ActionKind = "search_repository"
+	ActionOutlineContext   ActionKind = "outline_context"
+	ActionInspectSymbol    ActionKind = "inspect_symbol"
+	ActionRunCommand       ActionKind = "run_command"
+	ActionSaveMemory       ActionKind = "save_memory"
+	ActionFinish           ActionKind = "finish"
 )
 
 type Decision struct {
@@ -55,4 +59,6 @@ type Decision struct {
 	Title   string
 	Detail  string
 	Command string
+	Path    string
+	Symbol  string
 }

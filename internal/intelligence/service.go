@@ -5,15 +5,24 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
+
+	tree_sitter "github.com/tree-sitter/go-tree-sitter"
+	tree_sitter_bash "github.com/tree-sitter/tree-sitter-bash/bindings/go"
+	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
+	tree_sitter_javascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
+	tree_sitter_python "github.com/tree-sitter/tree-sitter-python/bindings/go"
+	tree_sitter_typescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
 type Service interface {
-	Scan(context.Context, Request) (ContextSnapshot, error)
+	Search(context.Context, Request) (SearchResult, error)
+	Outline(context.Context, OutlineRequest) (OutlineResult, error)
 }
 
 type Request struct {
@@ -24,8 +33,37 @@ type Request struct {
 type ContextSnapshot struct {
 	CandidateFiles []string
 	Symbols        map[string][]string
+	FocusedSymbol  *SymbolMatch
 	Summary        string
 	HasGoModule    bool
+}
+
+type SearchResult struct {
+	CandidateFiles []string
+	Summary        string
+	HasGoModule    bool
+}
+
+type OutlineRequest struct {
+	Task      string
+	Workspace string
+	Files     []string
+}
+
+type OutlineResult struct {
+	Symbols       map[string][]string
+	FocusedSymbol *SymbolMatch
+	Summary       string
+}
+
+type SymbolMatch struct {
+	Path       string
+	Name       string
+	Kind       string
+	StartLine  int
+	EndLine    int
+	Snippet    string
+	Confidence int
 }
 
 type LocalService struct{}
@@ -34,14 +72,243 @@ func New() *LocalService {
 	return &LocalService{}
 }
 
-var symbolPattern = regexp.MustCompile(`(?m)^\s*(?:func|type)\s+([A-Za-z_][A-Za-z0-9_]*)`)
+var symbolPattern = regexp.MustCompile(`(?m)^(\s*)(?:func\s+(?:\([^)]+\)\s*)?([A-Za-z_][A-Za-z0-9_]*)|type\s+([A-Za-z_][A-Za-z0-9_]*))`)
+var receiverTypePattern = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+
+type languageSpec struct {
+	lang       *tree_sitter.Language
+	extensions []string
+}
+
+var languageSpecs = []languageSpec{
+	{lang: tree_sitter.NewLanguage(tree_sitter_go.Language()), extensions: []string{".go"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_javascript.Language()), extensions: []string{".js", ".mjs", ".cjs", ".jsx"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()), extensions: []string{".ts"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTSX()), extensions: []string{".tsx"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_python.Language()), extensions: []string{".py"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_bash.Language()), extensions: []string{".sh", ".bash"}},
+}
+
+func (s *LocalService) Search(ctx context.Context, req Request) (SearchResult, error) {
+	tokens := taskTokens(req.Task)
+	scored, hasGoModule, err := s.collectCandidates(ctx, req.Workspace, tokens)
+	if err != nil {
+		return SearchResult{}, err
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].Kind != scored[j].Kind {
+			return scored[i].Kind < scored[j].Kind
+		}
+		if scored[i].Score == scored[j].Score {
+			return scored[i].Path < scored[j].Path
+		}
+		return scored[i].Score > scored[j].Score
+	})
+
+	limit := min(5, len(scored))
+	files := make([]string, 0, limit)
+	for _, candidate := range scored[:limit] {
+		files = append(files, candidate.Path)
+	}
+
+	summary := "No relevant files found."
+	if len(files) > 0 {
+		summary = fmt.Sprintf("Focused context narrowed to %d files: %s", len(files), strings.Join(files, ", "))
+	}
+	return SearchResult{
+		CandidateFiles: files,
+		Summary:        summary,
+		HasGoModule:    hasGoModule,
+	}, nil
+}
+
+func (s *LocalService) Outline(ctx context.Context, req OutlineRequest) (OutlineResult, error) {
+	tokens := taskTokens(req.Task)
+	symbols := make(map[string][]string, len(req.Files))
+	var focused *SymbolMatch
+	focusedScore := -1
+
+	for _, rel := range req.Files {
+		select {
+		case <-ctx.Done():
+			return OutlineResult{}, ctx.Err()
+		default:
+		}
+
+		content, err := os.ReadFile(filepath.Join(req.Workspace, rel))
+		if err != nil {
+			continue
+		}
+		outline := extractSymbols(string(content), rel)
+		if len(outline) == 0 {
+			continue
+		}
+
+		names := make([]string, 0, len(outline))
+		baseScore := scoreFile(rel, string(content), tokens)
+		for _, symbol := range outline {
+			names = append(names, symbol.Name)
+			score := scoreSymbol(symbol, tokens, baseScore)
+			if score > focusedScore {
+				s := symbol
+				s.Confidence = score
+				focused = &s
+				focusedScore = score
+			}
+		}
+		symbols[rel] = names
+	}
+
+	summary := "No strong symbol match yet."
+	if len(symbols) > 0 {
+		summary = fmt.Sprintf("Outlined %d candidate files.", len(symbols))
+	}
+	if focused != nil && (!hasStructuralTokenMatch(*focused, tokens) || focused.Confidence < minimumFocusedConfidence(tokens)) {
+		focused = nil
+	}
+	if focused != nil {
+		summary += fmt.Sprintf(" Best symbol match: %s in %s.", focused.Name, focused.Path)
+	} else if len(symbols) > 0 {
+		summary += " No strong symbol match yet."
+	}
+
+	return OutlineResult{
+		Symbols:       symbols,
+		FocusedSymbol: focused,
+		Summary:       summary,
+	}, nil
+}
 
 func (s *LocalService) Scan(ctx context.Context, req Request) (ContextSnapshot, error) {
-	tokens := taskTokens(req.Task)
+	search, err := s.Search(ctx, req)
+	if err != nil {
+		return ContextSnapshot{}, err
+	}
+	outline, err := s.Outline(ctx, OutlineRequest{
+		Task:      req.Task,
+		Workspace: req.Workspace,
+		Files:     search.CandidateFiles,
+	})
+	if err != nil {
+		return ContextSnapshot{}, err
+	}
+	summary := search.Summary
+	if outline.Summary != "" {
+		summary = search.Summary + " " + outline.Summary
+	}
+	return ContextSnapshot{
+		CandidateFiles: search.CandidateFiles,
+		Symbols:        outline.Symbols,
+		FocusedSymbol:  outline.FocusedSymbol,
+		Summary:        strings.TrimSpace(summary),
+		HasGoModule:    search.HasGoModule,
+	}, nil
+}
+
+type scoredFile struct {
+	Path    string
+	Score   int
+	Symbols []SymbolMatch
+	Kind    fileKind
+}
+
+type fileKind int
+
+const (
+	fileKindSource fileKind = iota
+	fileKindTest
+	fileKindDoc
+)
+
+func (s *LocalService) collectCandidates(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, error) {
+	if rg, hasGoModule, used, err := s.scanWithRipgrep(ctx, workspace, tokens); used || err != nil {
+		return rg, hasGoModule, err
+	}
+	return s.scanWithWalk(ctx, workspace, tokens)
+}
+
+func (s *LocalService) scanWithRipgrep(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, bool, error) {
+	if len(tokens) == 0 {
+		return nil, false, false, nil
+	}
+	if _, err := exec.LookPath("rg"); err != nil {
+		return nil, false, false, nil
+	}
+
+	pattern := strings.Join(tokens, "|")
+	cmd := exec.CommandContext(
+		ctx,
+		"rg",
+		"--files-with-matches",
+		"--smart-case",
+		"--glob", "!node_modules/**",
+		"--glob", "!.git/**",
+		"--glob", "!.projectkitty/**",
+		pattern,
+		workspace,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false, false, nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		lines = nil
+	}
+
+	scored := make([]scoredFile, 0, len(lines)+1)
+	hasGoModule := false
+	for _, line := range lines {
+		path := strings.TrimSpace(line)
+		if path == "" {
+			continue
+		}
+		rel, relErr := filepath.Rel(workspace, path)
+		if relErr != nil {
+			continue
+		}
+		rel = filepath.ToSlash(rel)
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			continue
+		}
+		if rel == "go.mod" {
+			hasGoModule = true
+		}
+		score := scoreFile(rel, string(content), tokens)
+		if score <= 0 {
+			continue
+		}
+		scored = append(scored, scoredFile{
+			Path:    rel,
+			Score:   score,
+			Symbols: extractSymbols(string(content), rel),
+			Kind:    classifyFile(rel),
+		})
+	}
+
+	if !hasGoModule {
+		if content, err := os.ReadFile(filepath.Join(workspace, "go.mod")); err == nil {
+			hasGoModule = true
+			scored = append(scored, scoredFile{
+				Path:    "go.mod",
+				Score:   scoreFile("go.mod", string(content), tokens),
+				Symbols: nil,
+				Kind:    fileKindSource,
+			})
+		}
+	}
+
+	return scored, hasGoModule, true, nil
+}
+
+func (s *LocalService) scanWithWalk(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, error) {
 	scored := make([]scoredFile, 0, 16)
 	hasGoModule := false
 
-	err := filepath.WalkDir(req.Workspace, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -64,7 +331,7 @@ func (s *LocalService) Scan(ctx context.Context, req Request) (ContextSnapshot, 
 			return nil
 		}
 
-		rel, relErr := filepath.Rel(req.Workspace, path)
+		rel, relErr := filepath.Rel(workspace, path)
 		if relErr != nil {
 			return nil
 		}
@@ -86,48 +353,16 @@ func (s *LocalService) Scan(ctx context.Context, req Request) (ContextSnapshot, 
 		scored = append(scored, scoredFile{
 			Path:    rel,
 			Score:   score,
-			Symbols: extractSymbols(string(content)),
+			Symbols: extractSymbols(string(content), rel),
+			Kind:    classifyFile(rel),
 		})
 		return nil
 	})
 	if err != nil {
-		return ContextSnapshot{}, err
+		return nil, false, err
 	}
 
-	sort.Slice(scored, func(i, j int) bool {
-		if scored[i].Score == scored[j].Score {
-			return scored[i].Path < scored[j].Path
-		}
-		return scored[i].Score > scored[j].Score
-	})
-
-	limit := min(5, len(scored))
-	files := make([]string, 0, limit)
-	symbols := make(map[string][]string, limit)
-	for _, candidate := range scored[:limit] {
-		files = append(files, candidate.Path)
-		if len(candidate.Symbols) > 0 {
-			symbols[candidate.Path] = candidate.Symbols
-		}
-	}
-
-	summary := "No relevant files found."
-	if len(files) > 0 {
-		summary = fmt.Sprintf("Focused context narrowed to %d files: %s", len(files), strings.Join(files, ", "))
-	}
-
-	return ContextSnapshot{
-		CandidateFiles: files,
-		Symbols:        symbols,
-		Summary:        summary,
-		HasGoModule:    hasGoModule,
-	}, nil
-}
-
-type scoredFile struct {
-	Path    string
-	Score   int
-	Symbols []string
+	return scored, hasGoModule, nil
 }
 
 func taskTokens(task string) []string {
@@ -138,35 +373,339 @@ func taskTokens(task string) []string {
 		if len(field) < 3 {
 			continue
 		}
+		if isWeakTaskToken(field) {
+			continue
+		}
 		tokens = append(tokens, field)
 	}
 	slices.Sort(tokens)
 	return slices.Compact(tokens)
 }
 
+func isWeakTaskToken(token string) bool {
+	switch token {
+	case "a", "an", "and", "are", "for", "from", "how", "into", "its", "not", "that", "the", "their", "them", "then", "there", "these", "this", "those", "validate", "check", "review", "analyze", "analyse", "look", "find", "show", "read", "run", "test", "tests", "verify", "inspect", "with", "without":
+		return true
+	default:
+		return false
+	}
+}
+
 func scoreFile(path, content string, tokens []string) int {
 	lowerPath := strings.ToLower(path)
 	lowerContent := strings.ToLower(content)
 	score := 0
+	matched := false
 	for _, token := range tokens {
 		if strings.Contains(lowerPath, token) {
-			score += 3
+			score += 4
+			matched = true
 		}
 		if strings.Contains(lowerContent, token) {
 			score++
+			matched = true
 		}
+	}
+	if !matched {
+		return 0
+	}
+	score += fileTypeBias(lowerPath)
+	return score
+}
+
+func fileTypeBias(path string) int {
+	switch {
+	case strings.HasSuffix(path, "_test.go"):
+		return -6
+	case strings.HasPrefix(path, "docs/"), strings.HasSuffix(path, ".md"), strings.HasSuffix(path, ".txt"):
+		return -8
+	case strings.Contains(path, "/vendor/"):
+		return -3
+	case strings.HasSuffix(path, ".go"):
+		return 2
+	default:
+		return 0
+	}
+}
+
+func extractSymbols(content, path string) []SymbolMatch {
+	if symbols := extractTreeSitterSymbols(content, path); len(symbols) > 0 {
+		return symbols
+	}
+	return extractRegexSymbols(content, path)
+}
+
+func extractTreeSitterSymbols(content, path string) []SymbolMatch {
+	language := languageForPath(path)
+	if language == nil {
+		return nil
+	}
+
+	parser := tree_sitter.NewParser()
+	defer parser.Close()
+	if err := parser.SetLanguage(language); err != nil {
+		return nil
+	}
+
+	tree := parser.Parse([]byte(content), nil)
+	if tree == nil {
+		return nil
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
+	if root == nil {
+		return nil
+	}
+
+	cursor := tree.Walk()
+	defer cursor.Close()
+	return collectTreeSitterSymbols(content, path, root, cursor, "")
+}
+
+func collectTreeSitterSymbols(content, path string, node *tree_sitter.Node, cursor *tree_sitter.TreeCursor, classContext string) []SymbolMatch {
+	result := make([]SymbolMatch, 0)
+	if node == nil {
+		return result
+	}
+
+	nextClassContext := classContext
+	if symbol := symbolFromNode(content, path, node, classContext); symbol != nil {
+		result = append(result, *symbol)
+		if node.Kind() == "class_declaration" || node.Kind() == "class_definition" {
+			nextClassContext = symbol.Name
+		}
+	}
+
+	for _, child := range node.NamedChildren(cursor) {
+		result = append(result, collectTreeSitterSymbols(content, path, &child, cursor, nextClassContext)...)
+	}
+	return result
+}
+
+func symbolFromNode(content, path string, node *tree_sitter.Node, classContext string) *SymbolMatch {
+	if node == nil {
+		return nil
+	}
+
+	kind := node.Kind()
+	nameNode := node.ChildByFieldName("name")
+
+	switch kind {
+	case "type_declaration":
+		return nil
+	case "type_spec":
+		return buildSymbol(content, path, node, "type", textForNode(content, nameNode))
+	case "function_declaration", "function_definition", "generator_function_declaration", "function_signature":
+		return buildSymbol(content, path, node, "func", textForNode(content, nameNode))
+	case "method_declaration":
+		name := textForNode(content, nameNode)
+		if receiver := receiverNameFromTreeSitter(content, node.ChildByFieldName("receiver")); receiver != "" {
+			name = receiver + "." + name
+		}
+		return buildSymbol(content, path, node, "func", name)
+	case "method_definition":
+		name := textForNode(content, nameNode)
+		if classContext != "" {
+			name = classContext + "." + name
+		}
+		return buildSymbol(content, path, node, "func", name)
+	case "class_declaration", "class_definition", "interface_declaration", "type_alias_declaration", "enum_declaration":
+		return buildSymbol(content, path, node, "type", textForNode(content, nameNode))
+	case "decorated_definition":
+		return symbolFromNode(content, path, node.ChildByFieldName("definition"), classContext)
+	default:
+		return nil
+	}
+}
+
+func buildSymbol(content, path string, node *tree_sitter.Node, kind, name string) *SymbolMatch {
+	if node == nil || name == "" {
+		return nil
+	}
+	start := int(node.StartByte())
+	end := int(node.EndByte())
+	if start < 0 || end > len(content) || start >= end {
+		return nil
+	}
+	return &SymbolMatch{
+		Path:      path,
+		Name:      name,
+		Kind:      kind,
+		StartLine: int(node.StartPosition().Row) + 1,
+		EndLine:   int(node.EndPosition().Row) + 1,
+		Snippet:   strings.TrimSpace(content[start:end]),
+	}
+}
+
+func languageForPath(path string) *tree_sitter.Language {
+	ext := strings.ToLower(filepath.Ext(path))
+	for _, spec := range languageSpecs {
+		if slices.Contains(spec.extensions, ext) {
+			return spec.lang
+		}
+	}
+	return nil
+}
+
+func textForNode(content string, node *tree_sitter.Node) string {
+	if node == nil {
+		return ""
+	}
+	start := int(node.StartByte())
+	end := int(node.EndByte())
+	if start < 0 || end > len(content) || start >= end {
+		return ""
+	}
+	return strings.TrimSpace(content[start:end])
+}
+
+func receiverNameFromTreeSitter(content string, node *tree_sitter.Node) string {
+	text := textForNode(content, node)
+	if text == "" {
+		return ""
+	}
+	parts := receiverTypePattern.FindAllString(text, -1)
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[len(parts)-1]
+}
+
+func extractRegexSymbols(content, path string) []SymbolMatch {
+	matches := symbolPattern.FindAllStringSubmatch(content, 6)
+	indices := symbolPattern.FindAllStringSubmatchIndex(content, 6)
+	if len(matches) == 0 {
+		return nil
+	}
+	symbols := make([]SymbolMatch, 0, len(matches))
+	for i, match := range matches {
+		name := match[2]
+		kind := "func"
+		if name == "" {
+			name = match[3]
+			kind = "type"
+		}
+		start, end := symbolRange(content, indices, i)
+		symbols = append(symbols, SymbolMatch{
+			Path:      path,
+			Name:      name,
+			Kind:      kind,
+			StartLine: lineNumber(content, start),
+			EndLine:   lineNumber(content, end),
+			Snippet:   strings.TrimSpace(content[start:end]),
+		})
+	}
+	return symbols
+}
+
+func symbolRange(content string, indices [][]int, idx int) (int, int) {
+	start := indices[idx][0]
+	end := len(content)
+	if idx+1 < len(indices) {
+		end = indices[idx+1][0]
+	}
+
+	blockStart := strings.Index(content[start:end], "{")
+	if blockStart >= 0 {
+		scanStart := start + blockStart
+		if blockEnd := matchingBrace(content, scanStart); blockEnd > scanStart {
+			return start, consumeTrailingNewline(content, blockEnd+1)
+		}
+	}
+
+	return start, trimTrailingWhitespace(content, end)
+}
+
+func matchingBrace(content string, open int) int {
+	depth := 0
+	for i := open; i < len(content); i++ {
+		switch content[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func consumeTrailingNewline(content string, idx int) int {
+	for idx < len(content) && (content[idx] == '\n' || content[idx] == '\r') {
+		idx++
+	}
+	return idx
+}
+
+func trimTrailingWhitespace(content string, idx int) int {
+	for idx > 0 {
+		switch content[idx-1] {
+		case ' ', '\t', '\n', '\r':
+			idx--
+		default:
+			return idx
+		}
+	}
+	return idx
+}
+
+func lineNumber(content string, idx int) int {
+	if idx <= 0 {
+		return 1
+	}
+	return strings.Count(content[:idx], "\n") + 1
+}
+
+func scoreSymbol(symbol SymbolMatch, tokens []string, base int) int {
+	score := base
+	lowerName := strings.ToLower(symbol.Name)
+	lowerSnippet := strings.ToLower(symbol.Snippet)
+	lowerPath := strings.ToLower(symbol.Path)
+	for _, token := range tokens {
+		if strings.Contains(lowerName, token) {
+			score += 6
+		}
+		if strings.Contains(lowerSnippet, token) {
+			score += 1
+		}
+		if strings.Contains(lowerPath, token) {
+			score += 2
+		}
+	}
+	if strings.HasSuffix(lowerPath, "_test.go") {
+		score -= 4
 	}
 	return score
 }
 
-func extractSymbols(content string) []string {
-	matches := symbolPattern.FindAllStringSubmatch(content, 6)
-	if len(matches) == 0 {
-		return nil
+func minimumFocusedConfidence(tokens []string) int {
+	if len(tokens) == 0 {
+		return 8
 	}
-	symbols := make([]string, 0, len(matches))
-	for _, match := range matches {
-		symbols = append(symbols, match[1])
+	return 6 + len(tokens)
+}
+
+func hasStructuralTokenMatch(symbol SymbolMatch, tokens []string) bool {
+	lowerName := strings.ToLower(symbol.Name)
+	lowerPath := strings.ToLower(symbol.Path)
+	for _, token := range tokens {
+		if strings.Contains(lowerName, token) || strings.Contains(lowerPath, token) {
+			return true
+		}
 	}
-	return symbols
+	return false
+}
+
+func classifyFile(path string) fileKind {
+	switch {
+	case strings.HasSuffix(path, "_test.go"):
+		return fileKindTest
+	case strings.HasPrefix(path, "docs/"), strings.HasSuffix(path, ".md"), strings.HasSuffix(path, ".txt"):
+		return fileKindDoc
+	default:
+		return fileKindSource
+	}
 }
