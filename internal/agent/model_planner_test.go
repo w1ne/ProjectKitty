@@ -230,7 +230,6 @@ func TestParseGeminiDecisionNoCandidates(t *testing.T) {
 // ── ModelPlanner with mock HTTP server ──────────────────────────────────────
 
 func TestModelPlannerMockServer(t *testing.T) {
-	// Set up a mock server that returns a valid Gemini function call response
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
 			"candidates": []any{
@@ -253,8 +252,9 @@ func TestModelPlannerMockServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Patch the endpoint for this test by creating a planner and calling next directly
-	// (We test via parseGeminiDecision since the endpoint is a package-level const)
+	planner := NewModelPlanner("test-key")
+	planner.endpoint = srv.URL // inject mock server
+
 	state := State{
 		Input: RunInput{Task: "find auth"},
 		SearchTool: &SearchToolState{
@@ -262,15 +262,9 @@ func TestModelPlannerMockServer(t *testing.T) {
 		},
 	}
 
-	// Verify the fallback path: if the HTTP call errors, we get a DefaultPlanner decision
-	planner := NewModelPlanner("invalid-key-to-force-fallback-in-real-tests")
-	_ = planner
-	_ = state
-
-	// The real integration would require a live API key. For unit coverage, verify
-	// that the fallback planner is used on error by checking it's non-nil.
-	if planner.fallback == nil {
-		t.Error("ModelPlanner should have a non-nil fallback DefaultPlanner")
+	decision := planner.Next(state)
+	if decision.Kind != ActionOutlineContext {
+		t.Errorf("expected outline_context from mock server, got %q", decision.Kind)
 	}
 }
 

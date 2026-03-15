@@ -189,12 +189,16 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 			}
 
 		case ActionRunCommand:
+				cmd := decision.Command
+				if cmd == "" {
+					cmd = chooseValidationCommand(state)
+				}
 				call := runtime.Call{
 					Tool:      runtime.ToolShell,
 					Workspace: input.Workspace,
-					Command:   decision.Command,
+					Command:   cmd,
 				}
-				events <- newEvent(EventAction, step, "Runtime action", decision.Command)
+				events <- newEvent(EventAction, step, "Runtime action", cmd)
 				result, err := a.runtime.Execute(ctx, call)
 				if err != nil {
 					events <- newErrorEvent(step, "Execute command", err)

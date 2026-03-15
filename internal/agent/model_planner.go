@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+const defaultGeminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 const plannerSystemPrompt = `You are the planning component of a coding agent called projectKitty.
 Your job is to choose the next action to complete the given task by calling one of the available tools.
@@ -29,12 +29,14 @@ Rules:
 // and let it navigate iteratively, rather than running a hardcoded sequence.
 type ModelPlanner struct {
 	apiKey   string
+	endpoint string
 	fallback *DefaultPlanner
 }
 
 func NewModelPlanner(apiKey string) *ModelPlanner {
 	return &ModelPlanner{
 		apiKey:   apiKey,
+		endpoint: defaultGeminiEndpoint,
 		fallback: NewPlanner(),
 	}
 }
@@ -65,7 +67,7 @@ func (p *ModelPlanner) next(ctx context.Context, state State) (Decision, error) 
 	}
 
 	body, _ := json.Marshal(reqBody)
-	req, err := http.NewRequestWithContext(ctx, "POST", geminiEndpoint+"?key="+p.apiKey, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", p.endpoint+"?key="+p.apiKey, bytes.NewReader(body))
 	if err != nil {
 		return Decision{}, err
 	}
