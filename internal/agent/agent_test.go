@@ -341,19 +341,18 @@ func TestAgentRunBroadensSearchWhenNoSymbolOnFirstOutline(t *testing.T) {
 		store,
 	)
 
-	var sawBroadened bool
+	var sawFinishedOrError bool
 	for event := range app.Run(context.Background(), RunInput{
 		Task:      "inspect auth middleware",
 		Workspace: dir,
 	}) {
-		if event.Kind == EventSearchObserved && event.Title == "Broadened search results" {
-			sawBroadened = true
+		if event.Kind == EventFinished || event.Kind == EventErrored || event.Kind == EventLoopDetected {
+			sawFinishedOrError = true
 		}
 	}
-
-	// If the first search+outline already finds a focused symbol, broadening is
-	// skipped — that's also valid. Only assert when we actually broadened.
-	_ = sawBroadened // presence is optional; absence is also fine when first pass succeeds
+	if !sawFinishedOrError {
+		t.Fatal("expected agent to reach a terminal event (finished, errored, or loop detected)")
+	}
 }
 
 func TestLongestWord(t *testing.T) {

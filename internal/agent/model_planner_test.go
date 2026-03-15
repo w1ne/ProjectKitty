@@ -269,16 +269,15 @@ func TestModelPlannerMockServer(t *testing.T) {
 }
 
 func TestModelPlannerFallbackOnAPIError(t *testing.T) {
-	// A planner with an intentionally bad API key should fall back to DefaultPlanner
-	planner := NewModelPlanner("bad-key")
+	// Use a non-routable address so the HTTP call fails immediately without network I/O.
+	planner := NewModelPlanner("test-key")
+	planner.endpoint = "http://127.0.0.1:1" // port 1 is never open; connection refused instantly
 
-	// State with no search done yet — DefaultPlanner returns ActionSearchRepository
 	decision := planner.Next(State{Input: RunInput{Task: "find the loop guard"}})
 
-	// The Gemini call will fail (bad key / no network needed since it'll get an HTTP error or DNS error)
-	// but the important thing is we get a valid decision back, not a panic.
-	if decision.Kind == "" {
-		t.Error("fallback planner should return a valid decision kind")
+	// Connection refused → fallback to DefaultPlanner → ActionSearchRepository
+	if decision.Kind != ActionSearchRepository {
+		t.Errorf("expected fallback to ActionSearchRepository, got %q", decision.Kind)
 	}
 }
 
