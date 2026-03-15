@@ -1,10 +1,14 @@
 # What a Coding Agent Actually Reads
 
-Article 1 defined the architecture. Article 2 is where it starts doing real work.
+Task: *inspect the planner validation command*.
 
-When we first wired up a naive context pass, the agent did what most wrappers do: it over-read. A task about validation would pull in planner code, test files, notes, and whatever else happened to mention `test` or `run`. The result was confident, plausible, wrong answers. Not because the model was bad. Because we handed it forty files when it needed one function. The noise won.
+A naive agent searches for `validate`, `run`, `test`, `plan` — anything that sounds related. It finds `planner.go`, `agent.go`, `agent_test.go`, `planner_test.go`, the README, and a few stray notes. All of them mention those words somewhere. The agent sends all of it to the model.
 
-That's the problem this article solves. A coding agent doesn't get better by reading more code. It gets better by reading less of the right code. The difference between a wrapper and a real agent is mostly this: the wrapper guesses and floods, the agent narrows and extracts.
+The model reads everything and returns a confident, detailed answer. Wrong function. Wrong file. It described `ActionRunCommand` in the agent loop when the actual question was about `chooseValidationCommand` in the planner — twelve lines that pick `go test ./...` or `git status --short`. The model never saw it because it was buried under forty files of noise.
+
+That's not a model failure. Given the context it received, the model did fine. The failure was earlier: we let the agent read too much.
+
+This article is about fixing that. A coding agent doesn't get better by reading more code. It gets better by reading less of the right code. The difference between a wrapper and a real agent is mostly this: the wrapper guesses and floods, the agent narrows and extracts.
 
 This is the code-reading layer for projectKitty, what we call **Whiskers**. Its job:
 
@@ -13,32 +17,37 @@ This is the code-reading layer for projectKitty, what we call **Whiskers**. Its 
 - return focused context to the planner
 - protect the model from repository noise
 
-Let's build it.
-
 ---
 
-## 1. Raw File Reading Is Just Expensive Guessing
+## 1. The Actual Problem: Wrong Files, Confident Answers
 
-If a user says "inspect the planner validation command" and the agent responds by reading every file with `plan`, `run`, or `test` in the name, plus the README just in case — that's not intelligence. That's a keyword search with a token bill.
+Here's what the naive version did, step by step, on that same task:
 
-The model burns budget on code that's adjacent to the task but irrelevant to it. The planner gets weaker signals. The whole loop slows down before it's even started.
+1. Tokenize "inspect the planner validation command" → `["planner", "validation", "command"]`
+2. Search every file containing any of those tokens
+3. Get back: `planner.go`, `agent.go`, `agent_test.go`, `planner_test.go`, `README.md`, `ARTICLE_1.md`
+4. Send all of it to the model as context
 
-```mermaid
-flowchart TD
-    A[Inspect planner validation command] --> B[Read many related files]
-    B --> C[Send broad context]
-    C --> D[High noise]
-    D --> E[Worse decisions]
-```
+The model anchored on `agent.go` because it's the largest file and contains the most token matches. It found `ActionRunCommand` — which *does* run commands — and answered confidently about that. But `chooseValidationCommand` in `planner.go` is the actual function being asked about. Never got shown.
 
 The system didn't fail at reasoning. It failed at narrowing. Fix that first.
 
 ```mermaid
 flowchart TD
-    A[Inspect planner validation command] --> B[Search likely files]
-    B --> C[Extract symbols]
-    C --> D[Return focused snapshot]
-    D --> E[Planner chooses next action]
+    A[inspect planner validation command] --> B[keyword match across repo]
+    B --> C[40 files, 12K tokens]
+    C --> D[model anchors on wrong symbol]
+    D --> E[confident wrong answer]
+```
+
+The right behavior:
+
+```mermaid
+flowchart TD
+    A[inspect planner validation command] --> B[score and rank files]
+    B --> C[outline top candidates]
+    C --> D[chooseValidationCommand in planner.go]
+    D --> E[12 lines, correct answer]
 ```
 
 The quality of every downstream decision depends on this step. Get it wrong and you're making mistakes faster.
