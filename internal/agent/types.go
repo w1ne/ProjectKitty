@@ -97,4 +97,5 @@ type Decision struct {
 	Command  string
 	Path     string
 	Symbol   string
+	Query    string // optional: model-driven planners can override the search query
 }

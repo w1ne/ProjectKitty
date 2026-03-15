@@ -33,8 +33,15 @@ func main() {
 		log.Fatal(err)
 	}
 
+	var planner agent.Planner
+	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
+		planner = agent.NewGeminiPlanner(key)
+	} else {
+		planner = agent.NewPlanner()
+	}
+
 	app := agent.New(
-		agent.NewPlanner(),
+		planner,
 		intelligence.New(),
 		runtime.New(runtime.Policy{
 			ApprovalMode: "on-failure",

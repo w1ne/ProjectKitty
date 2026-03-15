@@ -68,8 +68,12 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 
 			switch decision.Kind {
 			case ActionSearchRepository:
+				query := input.Task
+				if decision.Query != "" {
+					query = decision.Query
+				}
 				req := intelligence.Request{
-					Task:      input.Task,
+					Task:      query,
 					Workspace: input.Workspace,
 				}
 				search, err := a.intelligence.Search(ctx, req)
@@ -160,10 +164,14 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 				}
 
 			case ActionOutlineRelated:
+			var relatedFiles []string
+			if state.OutlineTool != nil && state.OutlineTool.Result != nil {
+				relatedFiles = state.OutlineTool.Result.RelatedFiles
+			}
 			req := intelligence.OutlineRequest{
 				Task:      input.Task,
 				Workspace: input.Workspace,
-				Files:     state.OutlineTool.Result.RelatedFiles,
+				Files:     relatedFiles,
 			}
 			outline, err := a.intelligence.Outline(ctx, req)
 			if err != nil {
