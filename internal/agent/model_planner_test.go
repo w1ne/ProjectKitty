@@ -227,9 +227,9 @@ func TestParseGeminiDecisionNoCandidates(t *testing.T) {
 	}
 }
 
-// ── GeminiPlanner with mock HTTP server ──────────────────────────────────────
+// ── ModelPlanner with mock HTTP server ──────────────────────────────────────
 
-func TestGeminiPlannerMockServer(t *testing.T) {
+func TestModelPlannerMockServer(t *testing.T) {
 	// Set up a mock server that returns a valid Gemini function call response
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
@@ -263,20 +263,20 @@ func TestGeminiPlannerMockServer(t *testing.T) {
 	}
 
 	// Verify the fallback path: if the HTTP call errors, we get a DefaultPlanner decision
-	planner := NewGeminiPlanner("invalid-key-to-force-fallback-in-real-tests")
+	planner := NewModelPlanner("invalid-key-to-force-fallback-in-real-tests")
 	_ = planner
 	_ = state
 
 	// The real integration would require a live API key. For unit coverage, verify
 	// that the fallback planner is used on error by checking it's non-nil.
 	if planner.fallback == nil {
-		t.Error("GeminiPlanner should have a non-nil fallback DefaultPlanner")
+		t.Error("ModelPlanner should have a non-nil fallback DefaultPlanner")
 	}
 }
 
-func TestGeminiPlannerFallbackOnAPIError(t *testing.T) {
+func TestModelPlannerFallbackOnAPIError(t *testing.T) {
 	// A planner with an intentionally bad API key should fall back to DefaultPlanner
-	planner := NewGeminiPlanner("bad-key")
+	planner := NewModelPlanner("bad-key")
 
 	// State with no search done yet — DefaultPlanner returns ActionSearchRepository
 	decision := planner.Next(State{Input: RunInput{Task: "find the loop guard"}})
@@ -288,8 +288,8 @@ func TestGeminiPlannerFallbackOnAPIError(t *testing.T) {
 	}
 }
 
-// Ensure GeminiPlanner implements the Planner interface at compile time.
-var _ Planner = (*GeminiPlanner)(nil)
+// Ensure ModelPlanner implements the Planner interface at compile time.
+var _ Planner = (*ModelPlanner)(nil)
 
 // Ensure DefaultPlanner implements the Planner interface at compile time.
 var _ Planner = (*DefaultPlanner)(nil)

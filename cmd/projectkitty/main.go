@@ -35,7 +35,7 @@ func main() {
 
 	var planner agent.Planner
 	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
-		planner = agent.NewGeminiPlanner(key)
+		planner = agent.NewModelPlanner(key)
 	} else {
 		planner = agent.NewPlanner()
 	}

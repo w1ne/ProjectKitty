@@ -24,22 +24,22 @@ Rules:
 - Call save_memory then finish when the task is complete.
 - Prefer specific function names and identifiers in search queries over generic words.`
 
-// GeminiPlanner is a model-driven planner that calls Gemini to decide the next action.
+// ModelPlanner is a model-driven planner that calls Gemini to decide the next action.
 // This mirrors how Claude Code and Gemini CLI expose search/read tools to the model
 // and let it navigate iteratively, rather than running a hardcoded sequence.
-type GeminiPlanner struct {
+type ModelPlanner struct {
 	apiKey   string
 	fallback *DefaultPlanner
 }
 
-func NewGeminiPlanner(apiKey string) *GeminiPlanner {
-	return &GeminiPlanner{
+func NewModelPlanner(apiKey string) *ModelPlanner {
+	return &ModelPlanner{
 		apiKey:   apiKey,
 		fallback: NewPlanner(),
 	}
 }
 
-func (p *GeminiPlanner) Next(state State) Decision {
+func (p *ModelPlanner) Next(state State) Decision {
 	decision, err := p.next(context.Background(), state)
 	if err != nil {
 		return p.fallback.Next(state)
@@ -47,7 +47,7 @@ func (p *GeminiPlanner) Next(state State) Decision {
 	return decision
 }
 
-func (p *GeminiPlanner) next(ctx context.Context, state State) (Decision, error) {
+func (p *ModelPlanner) next(ctx context.Context, state State) (Decision, error) {
 	reqBody := map[string]any{
 		"system_instruction": map[string]any{
 			"parts": []map[string]any{{"text": plannerSystemPrompt}},
