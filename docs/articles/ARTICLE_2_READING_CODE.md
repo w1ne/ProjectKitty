@@ -2,13 +2,29 @@
 
 Task: *inspect the planner validation command*.
 
-The naive version gave this answer:
+We ran it both ways against the actual projectKitty repo.
 
-> The validation command handling is in `agent.go`. When the planner emits an `ActionRunCommand` decision, the agent constructs a `runtime.Call` with `Tool: runtime.ToolShell` and executes the command in `decision.Command`. The result comes back as a `runtime.Result` with a summary string that gets recorded to session memory.
+**Naive:** scan every `.go` file containing any of `planner`, `validation`, `command`, `run`, `test`. Result: 13 files, 29,465 tokens of raw source. The top three by token-hit count are `service_test.go`, `agent_test.go`, `planner_test.go` — all test files. The file with the actual answer, `planner.go`, ranks 7th.
 
-Technically accurate. Completely beside the point. The question was about how the command gets *chosen*, not how it runs. The actual answer was in `planner.go`, a twelve-line function called `chooseValidationCommand`:
+Gemini 2.0 Flash read all of it and found the right answer:
 
-```go
+> The "planner validation command" is determined by the `chooseValidationCommand` function in `internal/agent/planner.go`. This function checks if the State indicates the presence of a Go module. If a Go module is detected, it returns `"go test ./..."`. Otherwise, it returns `"git status --short"`.
+
+Correct. The model is capable. But it burned 29,000 tokens to get there, most of them test file noise that had nothing to do with the question.
+
+**Whiskers on the same task:**
+
+```text
+Candidate files (5):
+  internal/agent/planner.go
+  cmd/projectkitty/main.go
+  internal/ui/model.go
+  internal/agent/agent.go
+  internal/intelligence/service.go
+
+Focused symbol: chooseValidationCommand in internal/agent/planner.go (confidence 72)
+
+Snippet:
 func chooseValidationCommand(state State) string {
     if state.SearchTool != nil && state.SearchTool.Result != nil && state.SearchTool.Result.HasGoModule {
         return "go test ./..."
@@ -25,11 +41,11 @@ func chooseValidationCommand(state State) string {
 }
 ```
 
-The model never saw this function. `agent.go` is larger, matches more of the task tokens (`validate`, `run`, `test`, `command`), and sits at the top of the scoring. The model anchored on `ActionRunCommand` — which does run commands — answered confidently about execution mechanics, and missed the selection logic entirely.
+The planner receives the summary and focused snippet — roughly 300 tokens. Same answer, 100x cheaper.
 
-That's not a model failure. Given what it received, the model did well. The failure was earlier: we handed it everything adjacent to the task instead of the one function the task was asking about.
+The argument for Whiskers is not that the model fails without it. On a clean question against a small repo, a capable model finds the right answer even in 30K tokens of noise. The argument is what happens at scale: a 20-turn agent session running naive search at 29K tokens per turn costs ~$2 per task at current API rates, and on a 50,000-file repository the naive file list stops fitting in context entirely. Whiskers exists to keep the per-turn cost low enough that the loop can actually run.
 
-This is the code-reading layer for projectKitty — **Whiskers**. Its job is to find `chooseValidationCommand` before the model asks, not after.
+This is the code-reading layer for projectKitty — **Whiskers**. Its job is to deliver `chooseValidationCommand` directly, without making the model search for it.
 
 ---
 
