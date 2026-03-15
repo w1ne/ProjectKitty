@@ -281,11 +281,11 @@ Article 2 is useful, but it is not complete. The important weaknesses are clear:
 - ranking is still mostly lexical and structural, not deeply semantic
 - cross-file reasoning is one hop: after reading the focused symbol, Whiskers outlines the related files to get their symbols — but still does not trace call graphs or data flow across multiple levels
 - less common languages still fall back to regex extraction; popular languages are now covered by Tree-sitter
-- repository walking is generic now, but the final fallback is still simpler than a fully indexed code-navigation system
+- tree-sitter coverage for constructs within already-supported languages — interface fields, anonymous functions, decorators — is still incomplete
 - the tool surface is cleaner now, but still not as explicitly separated and reusable as a more mature Codex-style architecture
 - syntax-aware extraction is good enough for this slice, but still not the same thing as full semantic understanding
 
-Three weaknesses that were listed here are now addressed: token estimation uses a per-extension heuristic (code files at bytes/3, prose at bytes/5, default at bytes/4) instead of a uniform bytes/4; `Scan` now performs an adaptive broadened retry when the first outline pass finds no focused symbol; and the planner-driven agent loop now does the same — when the outline stage finds no strong match, the planner emits `ActionBroadenSearch`, the agent re-runs search on the single longest task token, merges the expanded candidate list, and re-outlines with a `BroadenedSearch` guard to prevent infinite retries.
+Four weaknesses that were listed here are now addressed: token estimation uses a per-extension heuristic (code files at bytes/3, prose at bytes/5, default at bytes/4) instead of a uniform bytes/4; `Scan` now performs an adaptive broadened retry when the first outline pass finds no focused symbol; the planner-driven agent loop now does the same — when the outline stage finds no strong match, the planner emits `ActionBroadenSearch`, the agent re-runs search on the single longest task token, merges the expanded candidate list, and re-outlines with a `BroadenedSearch` guard to prevent infinite retries; and the generic walk fallback now skips common dependency and build directories (`vendor`, `node_modules`, `target`, `dist`, `__pycache__`, and others) that ripgrep and git ls-files already exclude via `.gitignore` — closing the gap between the walk backend and the primary backends.
 
 Those are not reasons to discard the subsystem. They are the reasons later articles still matter.
 
@@ -293,7 +293,7 @@ The practical follow-up list is straightforward:
 
 - improve ranking with stronger structural evidence
 - add richer code relationship tracing, beyond the current single hop
-- expand Tree-sitter coverage to constructs within already-supported languages (not just adding more file types)
+- expand Tree-sitter symbol extraction to additional constructs within already-supported languages (interface fields, anonymous functions, decorators)
 - keep tightening the tool and event boundaries around the subsystem
 
 That is the path from a useful code-reading layer to a much stronger one.

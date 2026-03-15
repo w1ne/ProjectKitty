@@ -749,6 +749,43 @@ func TestMergeFileLists(t *testing.T) {
 	}
 }
 
+func TestWalkSkipsVendorAndNodeModules(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	writeFiles(t, dir, map[string]string{
+		"go.mod":                                "module example.com/test\n\ngo 1.24.0\n",
+		"internal/auth/middleware.go":            "package auth\n\nfunc AuthMiddleware() {}\n",
+		"vendor/github.com/foo/bar/bar.go":       "package bar\n\nfunc AuthMiddleware() {}\n",
+		"node_modules/react/index.js":            "function AuthMiddleware() {}\n",
+		"__pycache__/middleware.cpython-311.pyc": "junk\n",
+	})
+
+	// Force walk backend by removing rg and git from PATH perspective via a workspace
+	// that won't have rg match anything (task token won't match the junk files).
+	svc := New()
+	scored, _, err := svc.scanWithWalk(context.Background(), dir, []string{"authmiddleware", "auth"})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	for _, sf := range scored {
+		for _, skip := range []string{"vendor/", "node_modules/", "__pycache__/"} {
+			if strings.HasPrefix(sf.Path, skip) {
+				t.Fatalf("walk returned file from skipped dir %q: %s", skip, sf.Path)
+			}
+		}
+	}
+}
+
+func TestWalkSkipDirsContainsExpectedKeys(t *testing.T) {
+	for _, key := range []string{"vendor", "node_modules", "target", "dist", "__pycache__", ".git"} {
+		if _, ok := walkSkipDirs[key]; !ok {
+			t.Errorf("walkSkipDirs missing expected key %q", key)
+		}
+	}
+}
+
 // ---- Benchmarks ----
 
 func BenchmarkFuzzyContains(b *testing.B) {

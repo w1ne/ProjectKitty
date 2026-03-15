@@ -572,6 +572,17 @@ func (s *LocalService) scanWithGit(ctx context.Context, workspace string, tokens
 	return scored, hasGoModule, true, nil
 }
 
+// walkSkipDirs lists directory names that should never be descended into during
+// the generic workspace walk. ripgrep and git ls-files naturally exclude these
+// via .gitignore; the walk fallback must do so explicitly.
+var walkSkipDirs = map[string]struct{}{
+	".git": {}, ".hg": {}, ".svn": {},
+	"node_modules": {}, "vendor": {},
+	"target": {}, "dist": {}, "build": {}, "out": {},
+	"__pycache__": {}, ".pytest_cache": {},
+	".tox": {}, "venv": {}, ".venv": {}, "env": {},
+}
+
 func (s *LocalService) scanWithWalk(ctx context.Context, workspace string, tokens []string) ([]scoredFile, bool, error) {
 	scored := make([]scoredFile, 0, 16)
 	hasGoModule := false
@@ -588,8 +599,13 @@ func (s *LocalService) scanWithWalk(ctx context.Context, workspace string, token
 
 		name := d.Name()
 		if d.IsDir() {
-			if strings.HasPrefix(name, ".") && path != workspace {
-				return filepath.SkipDir
+			if path != workspace {
+				if strings.HasPrefix(name, ".") {
+					return filepath.SkipDir
+				}
+				if _, skip := walkSkipDirs[name]; skip {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
