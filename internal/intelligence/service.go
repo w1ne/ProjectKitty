@@ -14,12 +14,20 @@ import (
 
 	tree_sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_bash "github.com/tree-sitter/tree-sitter-bash/bindings/go"
+	tree_sitter_c "github.com/tree-sitter/tree-sitter-c/bindings/go"
+	tree_sitter_css "github.com/tree-sitter/tree-sitter-css/bindings/go"
+	tree_sitter_cpp "github.com/tree-sitter/tree-sitter-cpp/bindings/go"
+	tree_sitter_c_sharp "github.com/tree-sitter/tree-sitter-c-sharp/bindings/go"
 	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
+	tree_sitter_html "github.com/tree-sitter/tree-sitter-html/bindings/go"
 	tree_sitter_java "github.com/tree-sitter/tree-sitter-java/bindings/go"
 	tree_sitter_javascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
+	tree_sitter_json "github.com/tree-sitter/tree-sitter-json/bindings/go"
+	tree_sitter_php "github.com/tree-sitter/tree-sitter-php/bindings/go"
 	tree_sitter_python "github.com/tree-sitter/tree-sitter-python/bindings/go"
 	tree_sitter_ruby "github.com/tree-sitter/tree-sitter-ruby/bindings/go"
 	tree_sitter_rust "github.com/tree-sitter/tree-sitter-rust/bindings/go"
+	tree_sitter_scala "github.com/tree-sitter/tree-sitter-scala/bindings/go"
 	tree_sitter_typescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
@@ -64,10 +72,11 @@ type OutlineRequest struct {
 }
 
 type OutlineResult struct {
-	Symbols       map[string][]string
-	FocusedSymbol *SymbolMatch
-	RelatedFiles  []string
-	Summary       string
+	Symbols         map[string][]string
+	FocusedSymbol   *SymbolMatch
+	RelatedFiles    []string
+	Summary         string
+	EstimatedTokens int
 }
 
 type SymbolMatch struct {
@@ -99,6 +108,14 @@ var languageSpecs = []languageSpec{
 	{lang: tree_sitter.NewLanguage(tree_sitter_rust.Language()), extensions: []string{".rs"}},
 	{lang: tree_sitter.NewLanguage(tree_sitter_ruby.Language()), extensions: []string{".rb"}},
 	{lang: tree_sitter.NewLanguage(tree_sitter_bash.Language()), extensions: []string{".sh", ".bash"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_c.Language()), extensions: []string{".c", ".h"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_cpp.Language()), extensions: []string{".cpp", ".cc", ".cxx", ".hpp"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_c_sharp.Language()), extensions: []string{".cs"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_php.LanguagePHP()), extensions: []string{".php"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_scala.Language()), extensions: []string{".scala"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_html.Language()), extensions: []string{".html", ".htm"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_json.Language()), extensions: []string{".json"}},
+	{lang: tree_sitter.NewLanguage(tree_sitter_css.Language()), extensions: []string{".css", ".scss", ".sass"}},
 }
 
 type SearchTool struct{}
@@ -149,6 +166,7 @@ func (t *OutlineTool) Outline(ctx context.Context, s *LocalService, req OutlineR
 	var focused *SymbolMatch
 	focusedScore := -1
 	relatedCache := make(map[string][]string)
+	totalEstimatedTokens := 0
 
 	for _, rel := range req.Files {
 		select {
@@ -161,6 +179,7 @@ func (t *OutlineTool) Outline(ctx context.Context, s *LocalService, req OutlineR
 		if err != nil {
 			continue
 		}
+		totalEstimatedTokens += estimateTokens(rel, len(content))
 		outline := extractSymbols(string(content), rel)
 		if len(outline) == 0 {
 			continue
@@ -200,20 +219,22 @@ func (t *OutlineTool) Outline(ctx context.Context, s *LocalService, req OutlineR
 		}
 		summary += fmt.Sprintf(" Best symbol match: %s in %s.", focused.Name, focused.Path)
 		return OutlineResult{
-			Symbols:       symbols,
-			FocusedSymbol: focused,
-			RelatedFiles:  relatedFiles,
-			Summary:       summary,
+			Symbols:         symbols,
+			FocusedSymbol:   focused,
+			RelatedFiles:    relatedFiles,
+			Summary:         summary,
+			EstimatedTokens: totalEstimatedTokens,
 		}, nil
 	} else if len(symbols) > 0 {
 		summary += " No strong symbol match yet."
 	}
 
 	return OutlineResult{
-		Symbols:       symbols,
-		FocusedSymbol: focused,
-		RelatedFiles:  nil,
-		Summary:       summary,
+		Symbols:         symbols,
+		FocusedSymbol:   focused,
+		RelatedFiles:    nil,
+		Summary:         summary,
+		EstimatedTokens: totalEstimatedTokens,
 	}, nil
 }
 
@@ -250,6 +271,26 @@ func (s *LocalService) Scan(ctx context.Context, req Request) (ContextSnapshot, 
 	if err != nil {
 		return ContextSnapshot{}, err
 	}
+
+	// Adaptive retry: if no focused symbol found, broaden the search to the single
+	// strongest token and merge any new candidates into a second outline pass.
+	if outline.FocusedSymbol == nil {
+		if broad := longestToken(taskTokens(req.Task)); broad != "" {
+			broadSearch, broadErr := s.Search(ctx, Request{Task: broad, Workspace: req.Workspace})
+			if broadErr == nil && len(broadSearch.CandidateFiles) > 0 {
+				merged := mergeFileLists(search.CandidateFiles, broadSearch.CandidateFiles)
+				if broadOutline, broadErr := s.Outline(ctx, OutlineRequest{
+					Task:      req.Task,
+					Workspace: req.Workspace,
+					Files:     merged,
+				}); broadErr == nil && broadOutline.FocusedSymbol != nil {
+					outline = broadOutline
+					search.CandidateFiles = merged
+				}
+			}
+		}
+	}
+
 	summary := search.Summary
 	if outline.Summary != "" {
 		summary = search.Summary + " " + outline.Summary
@@ -262,6 +303,89 @@ func (s *LocalService) Scan(ctx context.Context, req Request) (ContextSnapshot, 
 		Summary:        strings.TrimSpace(summary),
 		HasGoModule:    search.HasGoModule,
 	}, nil
+}
+
+// longestToken returns the longest token — most likely to be a distinctive identifier.
+func longestToken(tokens []string) string {
+	best := ""
+	for _, t := range tokens {
+		if len(t) > len(best) {
+			best = t
+		}
+	}
+	return best
+}
+
+// mergeFileLists returns a combined slice with duplicates removed, preserving order.
+func mergeFileLists(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	result := make([]string, 0, len(a)+len(b))
+	for _, f := range append(a, b...) {
+		if _, ok := seen[f]; !ok {
+			seen[f] = struct{}{}
+			result = append(result, f)
+		}
+	}
+	return result
+}
+
+const maxSnippetLines = 20
+
+// estimateTokens returns a per-language token estimate for a file.
+// Code files are token-dense (~3 bytes/token); prose and markup are sparser (~5 bytes/token).
+// The fallback is the commonly cited ~4 bytes/token approximation.
+func estimateTokens(path string, byteLen int) int {
+	if byteLen == 0 {
+		return 0
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go", ".rs", ".ts", ".tsx", ".js", ".java", ".py", ".rb",
+		".cpp", ".c", ".h", ".cs", ".php", ".scala", ".bash", ".sh":
+		return byteLen / 3
+	case ".md", ".txt", ".rst", ".adoc":
+		return byteLen / 5
+	default:
+		return byteLen / 4
+	}
+}
+
+func truncateSnippet(s string) string {
+	lines := strings.SplitN(s, "\n", maxSnippetLines+1)
+	if len(lines) <= maxSnippetLines {
+		return s
+	}
+	return strings.Join(lines[:maxSnippetLines], "\n")
+}
+
+// fuzzyPathScore returns a bonus score when task tokens appear as character
+// subsequences in the file path — Codex-style fuzzy file search.
+func fuzzyPathScore(path string, tokens []string) int {
+	score := 0
+	for _, token := range tokens {
+		if len(token) >= 4 && fuzzyContains(path, token) {
+			score++
+		}
+	}
+	return score
+}
+
+func fuzzyContains(haystack, needle string) bool {
+	hi := 0
+	for ni := 0; ni < len(needle); ni++ {
+		found := false
+		for hi < len(haystack) {
+			if haystack[hi] == needle[ni] {
+				hi++
+				found = true
+				break
+			}
+			hi++
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 type scoredFile struct {
@@ -665,6 +789,7 @@ func scoreFile(path, content string, tokens []string) int {
 	}
 
 	score += fileTypeBias(lowerPath)
+	score += fuzzyPathScore(lowerPath, tokens)
 	return score
 }
 
@@ -775,7 +900,9 @@ func symbolFromNode(content, path string, node *tree_sitter.Node, classContext s
 			name = classContext + "." + name
 		}
 		return buildSymbol(content, path, node, "func", name)
-	case "class_declaration", "class_definition", "interface_declaration", "type_alias_declaration", "enum_declaration", "struct_item", "enum_item", "trait_item", "class", "module":
+	case "class_declaration", "class_definition", "interface_declaration", "type_alias_declaration", "enum_declaration", "struct_item", "enum_item", "trait_item", "class", "module",
+		"class_specifier", "struct_specifier",
+		"object_definition", "trait_definition":
 		return buildSymbol(content, path, node, "type", textForNode(content, nameNode))
 	case "decorated_definition":
 		return symbolFromNode(content, path, node.ChildByFieldName("definition"), classContext)
@@ -799,7 +926,7 @@ func buildSymbol(content, path string, node *tree_sitter.Node, kind, name string
 		Kind:      kind,
 		StartLine: int(node.StartPosition().Row) + 1,
 		EndLine:   int(node.EndPosition().Row) + 1,
-		Snippet:   strings.TrimSpace(content[start:end]),
+		Snippet:   truncateSnippet(strings.TrimSpace(content[start:end])),
 	}
 }
 

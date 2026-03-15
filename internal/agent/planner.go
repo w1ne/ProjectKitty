@@ -1,6 +1,9 @@
 package agent
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 type Planner interface {
 	Next(State) Decision
@@ -31,6 +34,15 @@ func (p *DefaultPlanner) Next(state State) Decision {
 		}
 	}
 
+	if state.OutlineTool.Result.FocusedSymbol == nil && !state.BroadenedSearch {
+		return Decision{
+			Kind:     ActionBroadenSearch,
+			Title:    "Broaden search",
+			Detail:   "No focused symbol found — retry with the strongest task token to widen the candidate set.",
+			Thoughts: "The first outline pass found no strong match. Broadening to the single most distinctive token mirrors Claude's iterative tool-call refinement on low confidence.",
+		}
+	}
+
 	if state.OutlineTool.Result.FocusedSymbol != nil && (state.ReadSymbolTool == nil || state.ReadSymbolTool.Result == nil) {
 		return Decision{
 			Kind:     ActionInspectSymbol,
@@ -39,6 +51,17 @@ func (p *DefaultPlanner) Next(state State) Decision {
 			Thoughts: "We found a strong symbol match. Reading only this symbol reduces context usage and potential noise.",
 			Path:     state.OutlineTool.Result.FocusedSymbol.Path,
 			Symbol:   state.OutlineTool.Result.FocusedSymbol.Name,
+		}
+	}
+
+	if state.ReadSymbolTool != nil && state.ReadSymbolTool.Result != nil &&
+		state.OutlineTool != nil && len(state.OutlineTool.Result.RelatedFiles) > 0 &&
+		state.RelatedOutlineTool == nil {
+		return Decision{
+			Kind:     ActionOutlineRelated,
+			Title:    "Outline related files",
+			Detail:   fmt.Sprintf("Trace cross-file relationships from %s via: %s", state.OutlineTool.Result.FocusedSymbol.Name, strings.Join(state.OutlineTool.Result.RelatedFiles, ", ")),
+			Thoughts: "After reading the focused symbol, outline related files to understand callers and co-located types. This is the cross-file hop Claude handles through iterative model-driven tool calls.",
 		}
 	}
 

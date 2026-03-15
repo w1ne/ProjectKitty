@@ -59,13 +59,15 @@ That's a retrieval problem. Not vector search, not semantic magic — a discipli
 For the current useful version, that pipeline is:
 
 1. tokenize the task
-2. run a cheap first search pass
-3. run a refined structural search pass
-4. rank files by filename, content, and structural evidence
-5. run an outline pass over likely files
+2. run a cheap first search pass (ripgrep-style)
+3. run a refined structural search pass using names from the first slice
+4. rank files by filename content, and fuzzy path scoring
+5. run an outline pass over likely files — symbol snippets capped at 20 lines
 6. trace a few nearby related files around the strongest symbol
-7. optionally read one focused symbol
-8. return a compact snapshot
+7. optionally read one focused symbol when the match is strong enough
+8. outline the related files for one cross-file hop
+9. emit `context_window_will_overflow` if estimated token cost exceeds 40K
+10. emit `loop_detected` and stop if the session exceeds the turn limit
 
 That's already enough to make Whiskers behave very differently from a plain file dump.
 
@@ -107,7 +109,7 @@ Even a lightweight pass gives the planner far better signals:
 - is the target a `func`, a `type`, an interface
 - which file looks like implementation and which looks like wiring
 
-In Whiskers' current implementation, symbol extraction is syntax-aware across the languages we care about first: Go, Java, JavaScript, TypeScript, Python, and Bash. Under the hood it uses a single Tree-sitter-backed reader with per-language grammars, then falls back to regex extraction only for unsupported files. So instead of receiving a blind file path, the planner gets:
+In Whiskers' current implementation, symbol extraction is syntax-aware across the languages we care about first: Go, Java, JavaScript, TypeScript, Python, Rust, Ruby, Bash, C, C++, C#, PHP, and Scala — with HTML, JSON, and CSS also parsed structurally. Under the hood it uses a single Tree-sitter-backed reader with per-language grammars, then falls back to regex extraction only for unsupported files. So instead of receiving a blind file path, the planner gets:
 
 - `internal/agent/planner.go`
 - symbols: `chooseValidationCommand`, `NewPlanner`, `DefaultPlanner.Next`
@@ -117,6 +119,14 @@ That small upgrade changes the next action from "maybe read the whole file" to "
 Whiskers now also does one small but important thing beyond pure ranking: once it has a strong symbol match, it traces a few nearby related files that reference the same symbol. That is not deep call-graph analysis yet, but it gives the planner a better local neighborhood around the main target.
 
 Just as important, Whiskers now refuses weak matches. If the outline stage cannot produce a strong structural hit, it says so and stops there. That's a real behavior improvement over the typical agent failure mode of reading something nearby and acting confident about it.
+
+Three things Whiskers does now that most wrappers skip:
+
+**Snippet truncation.** Symbol snippets are capped at 20 lines — signature plus enough body to be useful, not the whole function. This is budget control at the extraction layer. Full bodies can be thousands of tokens; Whiskers doesn't send them.
+
+**Fuzzy path scoring.** Alongside exact content search, Whiskers uses character-subsequence matching on file paths — the same style as Codex's fuzzy file search. This catches files when task terms appear in path segments but not in file content, or when spelling varies.
+
+**Context window estimation.** After outlining, Whiskers estimates the token cost of the candidate context (file content / 4). If the estimate exceeds 40K tokens, it emits a `context_window_will_overflow` event — matching Gemini's named overflow state — so the planner and UI can respond before hitting a hard model limit.
 
 ---
 
@@ -134,7 +144,7 @@ So the interface stays small:
 - summarize what was found
 - expose basic repository facts
 
-That's exactly how projectKitty's `Scan` interface is shaped. It returns a `ContextSnapshot`: candidate files, symbol lists, a summary string, basic project signals like whether a Go module exists, and only a focused symbol when the match is actually strong enough. It does not try to solve the task. It hands the planner a clear picture and gets out of the way.
+That's exactly how projectKitty's `Scan` interface is shaped. It returns a `ContextSnapshot`: candidate files, symbol lists, a summary string, related files around the strongest match, basic project signals like whether a Go module exists, and only a focused symbol when the match is actually strong enough. It does not try to solve the task. It hands the planner a clear picture and gets out of the way.
 
 In the current repo, that looks like this:
 
@@ -210,6 +220,8 @@ The agent gets stronger when:
 
 Whiskers exists to protect this budget. Every unnecessary file it keeps is tokens the planner can't use for reasoning. Every symbol it misses is an action that starts with the wrong assumptions.
 
+The filtering is also cheap. Benchmarks on the current implementation show fuzzy path scoring at ~36 ns per call with zero allocations, symbol outlining at ~839 µs for a two-file candidate set, and a full search pass at ~8 ms including file I/O. Budget control doesn't cost much to enforce — the overhead of narrowing is far smaller than the cost of not narrowing.
+
 Focused context isn't aesthetic. It's how the loop stays fast and the decisions stay sharp.
 
 ---
@@ -219,12 +231,15 @@ Focused context isn't aesthetic. It's how the loop stays fast and the decisions 
 By the end of this article, projectKitty has a working code-intelligence subsystem with a clear job:
 
 - tokenize the task into search terms
-- search the workspace cheaply and fall back safely
+- search the workspace cheaply and fall back safely, with fuzzy path scoring as a secondary signal
 - rank candidate files
 - run a structural refinement pass before final ranking
-- build a syntax-aware symbol outline for likely files
+- build a syntax-aware symbol outline for likely files, with snippets capped at 20 lines
 - trace a few nearby related files for the strongest symbol
 - read a focused symbol only when the match is strong enough
+- outline the related files after reading the focused symbol for one cross-file hop
+- emit `context_window_will_overflow` if estimated token cost exceeds threshold
+- emit `loop_detected` and stop if the session exceeds the turn limit
 - return `No strong symbol match yet` when the repo does not justify a focused read
 - hand the planner a focused snapshot
 
@@ -237,7 +252,12 @@ user request → model guesses → broad file reads → noise
 to:
 
 ```text
-inspect planner validation command → Whiskers scans → planner.go + chooseValidationCommand → planner acts
+inspect planner validation command
+  → Search: planner.go, agent.go, types.go (2 passes via ripgrep)
+  → Outline: chooseValidationCommand in planner.go
+  → ReadSymbol: chooseValidationCommand
+  → OutlineRelated: agent.go, types.go (cross-file hop)
+  → planner acts
 ```
 
 That's a real upgrade. The architecture is doing useful work.
@@ -259,21 +279,21 @@ Craftydraft didn't have this problem because it never acted on anything. project
 Article 2 is useful, but it is not complete. The important weaknesses are clear:
 
 - ranking is still mostly lexical and structural, not deeply semantic
-- cross-file reasoning is still shallow; Whiskers now finds a few nearby related files, but it still does not trace call graphs, imports, or data flow in a serious way
-- unsupported languages still fall back to regex extraction
+- cross-file reasoning is one hop: after reading the focused symbol, Whiskers outlines the related files to get their symbols — but still does not trace call graphs or data flow across multiple levels
+- less common languages still fall back to regex extraction; popular languages are now covered by Tree-sitter
 - repository walking is generic now, but the final fallback is still simpler than a fully indexed code-navigation system
-- the event model is clearer than before, but still much simpler than Gemini's typed turn-state system
 - the tool surface is cleaner now, but still not as explicitly separated and reusable as a more mature Codex-style architecture
 - syntax-aware extraction is good enough for this slice, but still not the same thing as full semantic understanding
+
+Three weaknesses that were listed here are now addressed: token estimation uses a per-extension heuristic (code files at bytes/3, prose at bytes/5, default at bytes/4) instead of a uniform bytes/4; `Scan` now performs an adaptive broadened retry when the first outline pass finds no focused symbol; and the planner-driven agent loop now does the same — when the outline stage finds no strong match, the planner emits `ActionBroadenSearch`, the agent re-runs search on the single longest task token, merges the expanded candidate list, and re-outlines with a `BroadenedSearch` guard to prevent infinite retries.
 
 Those are not reasons to discard the subsystem. They are the reasons later articles still matter.
 
 The practical follow-up list is straightforward:
 
 - improve ranking with stronger structural evidence
-- add richer code relationship tracing
-- expand syntax-aware support across more languages and constructs
-- make retrieval capable of broadening or refining itself when confidence is low
+- add richer code relationship tracing, beyond the current single hop
+- expand Tree-sitter coverage to constructs within already-supported languages (not just adding more file types)
 - keep tightening the tool and event boundaries around the subsystem
 
 That is the path from a useful code-reading layer to a much stronger one.

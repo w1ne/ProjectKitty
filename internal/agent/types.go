@@ -21,6 +21,10 @@ const (
 	EventOutlineObserved EventKind = "outline_observed"
 	EventSymbolObserved  EventKind = "symbol_observed"
 
+	// Safety events (Gemini style)
+	EventLoopDetected            EventKind = "loop_detected"
+	EventContextWindowWillOverflow EventKind = "context_window_will_overflow"
+
 	EventMemory   EventKind = "memory"
 	EventFinished EventKind = "finished"
 	EventErrored  EventKind = "errored"
@@ -61,13 +65,15 @@ type ValidationToolState struct {
 }
 
 type State struct {
-	Input          RunInput
-	SearchTool     *SearchToolState
-	OutlineTool    *OutlineToolState
-	ReadSymbolTool *ReadSymbolToolState
-	ValidationTool *ValidationToolState
-	MemorySaved    bool
-	Steps          int
+	Input               RunInput
+	SearchTool          *SearchToolState
+	OutlineTool         *OutlineToolState
+	ReadSymbolTool      *ReadSymbolToolState
+	RelatedOutlineTool  *OutlineToolState
+	ValidationTool      *ValidationToolState
+	MemorySaved         bool
+	BroadenedSearch     bool // true after one adaptive broadened search retry
+	Steps               int
 }
 
 type ActionKind string
@@ -75,7 +81,9 @@ type ActionKind string
 const (
 	ActionSearchRepository ActionKind = "search_repository"
 	ActionOutlineContext   ActionKind = "outline_context"
+	ActionBroadenSearch    ActionKind = "broaden_search"
 	ActionInspectSymbol    ActionKind = "inspect_symbol"
+	ActionOutlineRelated   ActionKind = "outline_related"
 	ActionRunCommand       ActionKind = "run_command"
 	ActionSaveMemory       ActionKind = "save_memory"
 	ActionFinish           ActionKind = "finish"

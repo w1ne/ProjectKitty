@@ -27,6 +27,11 @@ func New(planner Planner, intel intelligence.Service, rt *runtime.Runtime, memor
 	}
 }
 
+const (
+	maxSessionTurns          = 20
+	contextOverflowTokens    = 40_000
+)
+
 func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 	events := make(chan Event)
 
@@ -43,6 +48,11 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 		events <- newEvent(EventStarted, 0, "Session started", fmt.Sprintf("Task: %s", input.Task))
 
 		for {
+			if state.Steps >= maxSessionTurns {
+				events <- newEvent(EventLoopDetected, state.Steps, "Loop detected", fmt.Sprintf("Session exceeded %d steps — stopping to prevent runaway execution.", maxSessionTurns))
+				_ = a.memory.EndSession(sessionID)
+				return
+			}
 			decision := a.planner.Next(state)
 			step := state.Steps + 1
 			events <- newEvent(EventPlanning, step, decision.Title, decision.Detail)
@@ -77,7 +87,31 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 					return
 				}
 
-			case ActionOutlineContext:
+			case ActionBroadenSearch:
+			broad := longestWord(input.Task)
+			if broad == "" {
+				state.BroadenedSearch = true
+				break
+			}
+			broadReq := intelligence.Request{
+				Task:      broad,
+				Workspace: input.Workspace,
+			}
+			broadSearch, err := a.intelligence.Search(ctx, broadReq)
+			if err == nil && len(broadSearch.CandidateFiles) > 0 {
+				merged := mergeUnique(state.SearchTool.Result.CandidateFiles, broadSearch.CandidateFiles)
+				state.SearchTool.Result.CandidateFiles = merged
+				broadSearch.Summary = fmt.Sprintf("Broadened search results (token %q): %s", broad, strings.Join(merged, ", "))
+				events <- newEvent(EventSearchObserved, step, "Broadened search results", broadSearch.Summary)
+				if err := a.memory.RecordSessionEvent(sessionID, "search_broad", broadSearch.Summary); err != nil {
+					events <- newErrorEvent(step, "Record broadened search", err)
+					return
+				}
+			}
+			state.BroadenedSearch = true
+			state.OutlineTool = nil // reset so planner re-outlines with merged candidates
+
+		case ActionOutlineContext:
 				req := intelligence.OutlineRequest{
 					Task:      input.Task,
 					Workspace: input.Workspace,
@@ -93,6 +127,10 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 					Result:  &outline,
 				}
 				events <- newEvent(EventOutlineObserved, step, "Outline results", outline.Summary)
+				if outline.EstimatedTokens > contextOverflowTokens {
+					events <- newEvent(EventContextWindowWillOverflow, step, "Context window warning",
+						fmt.Sprintf("Estimated context ~%d tokens exceeds threshold — candidate set will be trimmed on next pass.", outline.EstimatedTokens))
+				}
 				if err := a.memory.RecordSessionEvent(sessionID, "outline", outline.Summary); err != nil {
 					events <- newErrorEvent(step, "Record outline", err)
 					return
@@ -121,7 +159,28 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 					return
 				}
 
-			case ActionRunCommand:
+			case ActionOutlineRelated:
+			req := intelligence.OutlineRequest{
+				Task:      input.Task,
+				Workspace: input.Workspace,
+				Files:     state.OutlineTool.Result.RelatedFiles,
+			}
+			outline, err := a.intelligence.Outline(ctx, req)
+			if err != nil {
+				events <- newErrorEvent(step, "Outline related files", err)
+				return
+			}
+			state.RelatedOutlineTool = &OutlineToolState{
+				Request: req,
+				Result:  &outline,
+			}
+			events <- newEvent(EventOutlineObserved, step, "Related file outline", outline.Summary)
+			if err := a.memory.RecordSessionEvent(sessionID, "outline_related", outline.Summary); err != nil {
+				events <- newErrorEvent(step, "Record related outline", err)
+				return
+			}
+
+		case ActionRunCommand:
 				call := runtime.Call{
 					Tool:      runtime.ToolShell,
 					Workspace: input.Workspace,
@@ -186,6 +245,9 @@ func summarizeFact(state State) string {
 	if state.ReadSymbolTool != nil && state.ReadSymbolTool.Result != nil {
 		parts = append(parts, "Focused read: "+state.ReadSymbolTool.Result.Summary)
 	}
+	if state.RelatedOutlineTool != nil && state.RelatedOutlineTool.Result != nil {
+		parts = append(parts, "Related outline: "+state.RelatedOutlineTool.Result.Summary)
+	}
 	if state.ValidationTool != nil && state.ValidationTool.Result != nil {
 		parts = append(parts, "Validation: "+state.ValidationTool.Result.Summary)
 	}
@@ -203,6 +265,33 @@ func newEvent(kind EventKind, step int, title, detail string) Event {
 		Detail:    detail,
 		Timestamp: time.Now().UTC(),
 	}
+}
+
+// longestWord returns the longest whitespace-separated word in s.
+func longestWord(s string) string {
+	best := ""
+	for _, w := range strings.Fields(s) {
+		if len(w) > len(best) {
+			best = w
+		}
+	}
+	return best
+}
+
+// mergeUnique appends elements of b to a copy of a, skipping duplicates.
+func mergeUnique(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a))
+	out := make([]string, 0, len(a)+len(b))
+	for _, v := range a {
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	for _, v := range b {
+		if _, ok := seen[v]; !ok {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func newErrorEvent(step int, title string, err error) Event {

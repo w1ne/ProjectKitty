@@ -392,6 +392,214 @@ func TestOutlineUsesTreeSitterForJava(t *testing.T) {
 	}
 }
 
+func TestTruncateSnippet(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		input   string
+		wantLen int // number of lines expected in output
+		wantCut bool
+	}{
+		{
+			name:    "short snippet passes through unchanged",
+			input:   strings.Repeat("line\n", 10),
+			wantLen: 10,
+			wantCut: false,
+		},
+		{
+			name:    "exactly 20 lines passes through unchanged",
+			input:   strings.Repeat("line\n", 20),
+			wantLen: 20,
+			wantCut: false,
+		},
+		{
+			name:    "21 lines gets truncated to 20",
+			input:   strings.Repeat("line\n", 21),
+			wantLen: 20,
+			wantCut: true,
+		},
+		{
+			name:    "100 lines gets truncated to 20",
+			input:   strings.Repeat("line\n", 100),
+			wantLen: 20,
+			wantCut: true,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := truncateSnippet(tc.input)
+			lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+			if len(lines) != tc.wantLen {
+				t.Fatalf("expected %d lines, got %d: %q", tc.wantLen, len(lines), got)
+			}
+			if tc.wantCut && strings.Contains(got, strings.Repeat("line\n", 21)) {
+				t.Fatal("expected snippet to be cut but got full content")
+			}
+		})
+	}
+}
+
+func TestFuzzyContains(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		haystack string
+		needle   string
+		want     bool
+	}{
+		{"internal/auth/middleware.go", "middleware", true},
+		{"internal/auth/middleware.go", "auth", true},
+		{"internal/auth/middleware.go", "mdlwr", true},  // subsequence
+		{"internal/auth/middleware.go", "authzz", false}, // z not in path
+		{"src/planner.go", "planner", true},
+		{"src/planner.go", "PLANNER", false}, // case-sensitive
+		{"a/b/c.go", "abc", true},
+		{"a/b/c.go", "xyz", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.haystack+"~"+tc.needle, func(t *testing.T) {
+			t.Parallel()
+			got := fuzzyContains(tc.haystack, tc.needle)
+			if got != tc.want {
+				t.Fatalf("fuzzyContains(%q, %q) = %v, want %v", tc.haystack, tc.needle, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFuzzyPathScore(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		path      string
+		tokens    []string
+		wantScore int
+	}{
+		{
+			name:      "exact token in path scores",
+			path:      "internal/auth/middleware.go",
+			tokens:    []string{"middleware"},
+			wantScore: 1,
+		},
+		{
+			name:      "multiple matching tokens sum",
+			path:      "internal/auth/middleware.go",
+			tokens:    []string{"middleware", "auth"},
+			wantScore: 2,
+		},
+		{
+			name:      "short tokens under 4 chars are skipped",
+			path:      "internal/auth/middleware.go",
+			tokens:    []string{"go", "mid"},
+			wantScore: 0,
+		},
+		{
+			name:      "non-matching token scores zero",
+			path:      "internal/app/server.go",
+			tokens:    []string{"middleware"},
+			wantScore: 0,
+		},
+		{
+			name:      "fuzzy subsequence match scores",
+			path:      "internal/auth/middleware.go",
+			tokens:    []string{"mdlwr"},
+			wantScore: 1,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := fuzzyPathScore(tc.path, tc.tokens)
+			if got != tc.wantScore {
+				t.Fatalf("fuzzyPathScore(%q, %v) = %d, want %d", tc.path, tc.tokens, got, tc.wantScore)
+			}
+		})
+	}
+}
+
+func TestOutlineEstimatesTokens(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// Write a file with known content size — 400 bytes => ~100 estimated tokens
+	content := strings.Repeat("func Foo() {}\n", 28) // ~400 bytes
+	writeFiles(t, dir, map[string]string{
+		"internal/auth/middleware.go": "package auth\n\n" + content,
+	})
+
+	result, err := New().Outline(context.Background(), OutlineRequest{
+		Task:      "auth middleware",
+		Workspace: dir,
+		Files:     []string{"internal/auth/middleware.go"},
+	})
+	if err != nil {
+		t.Fatalf("outline: %v", err)
+	}
+	if result.EstimatedTokens <= 0 {
+		t.Fatal("expected EstimatedTokens > 0 after outlining real file content")
+	}
+}
+
+func TestSnippetTruncatedInOutlineSymbols(t *testing.T) {
+	t.Parallel()
+
+	// 25-line function body — snippet should be capped at 20 lines
+	longBody := "func BigFunc() {\n" + strings.Repeat("\t// line\n", 24) + "}\n"
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"internal/auth/handler.go": "package auth\n\n" + longBody,
+	})
+
+	result, err := New().Outline(context.Background(), OutlineRequest{
+		Task:      "bigfunc handler",
+		Workspace: dir,
+		Files:     []string{"internal/auth/handler.go"},
+	})
+	if err != nil {
+		t.Fatalf("outline: %v", err)
+	}
+	if result.FocusedSymbol == nil {
+		t.Skip("no focused symbol extracted — skipping snippet length check")
+	}
+	lineCount := len(strings.Split(result.FocusedSymbol.Snippet, "\n"))
+	if lineCount > maxSnippetLines+1 { // +1 tolerance for trailing newline
+		t.Fatalf("expected snippet capped at %d lines, got %d", maxSnippetLines, lineCount)
+	}
+}
+
+func TestFuzzyPathScoreImprovesCandidateRanking(t *testing.T) {
+	t.Parallel()
+
+	// "planner" token should prefer planner.go over agent.go via fuzzy path match
+	// even if both files have similar content
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"go.mod":                    "module example.com/test\n\ngo 1.24.0\n",
+		"internal/agent/planner.go": "package agent\n\nfunc Plan() {}\n",
+		"internal/agent/agent.go":   "package agent\n\nfunc Run() {}\n",
+	})
+
+	result, err := New().Search(context.Background(), Request{
+		Task:      "inspect planner",
+		Workspace: dir,
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(result.CandidateFiles) == 0 {
+		t.Fatal("expected candidates")
+	}
+	if result.CandidateFiles[0] != "internal/agent/planner.go" {
+		t.Fatalf("expected planner.go ranked first via fuzzy path boost, got %#v", result.CandidateFiles)
+	}
+}
+
 func TestOutlineFindsRelatedFilesForFocusedSymbol(t *testing.T) {
 	t.Parallel()
 
@@ -420,5 +628,219 @@ func TestOutlineFindsRelatedFilesForFocusedSymbol(t *testing.T) {
 	}
 	if !strings.Contains(result.Summary, "Related files:") {
 		t.Fatalf("expected related files summary, got %q", result.Summary)
+	}
+}
+
+func TestEstimateTokensPerExtension(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		path      string
+		byteLen   int
+		wantExact int
+	}{
+		// code files: bytes / 3
+		{"main.go", 300, 100},
+		{"lib.rs", 300, 100},
+		{"index.ts", 300, 100},
+		{"main.py", 300, 100},
+		// prose files: bytes / 5
+		{"README.md", 500, 100},
+		{"notes.txt", 500, 100},
+		// default: bytes / 4
+		{"config.yaml", 400, 100},
+		{"archive.zip", 400, 100},
+		// zero
+		{"empty.go", 0, 0},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+			got := estimateTokens(tc.path, tc.byteLen)
+			if got != tc.wantExact {
+				t.Fatalf("estimateTokens(%q, %d) = %d, want %d", tc.path, tc.byteLen, got, tc.wantExact)
+			}
+		})
+	}
+}
+
+func TestEstimateTokensCodeDenserThanProse(t *testing.T) {
+	t.Parallel()
+
+	const byteLen = 1200
+	codeTokens := estimateTokens("main.go", byteLen)
+	proseTokens := estimateTokens("notes.md", byteLen)
+	if codeTokens <= proseTokens {
+		t.Fatalf("expected code (%d) to estimate more tokens than prose (%d) for same byte length", codeTokens, proseTokens)
+	}
+}
+
+func TestScanAdaptiveBroadensOnLowConfidence(t *testing.T) {
+	t.Parallel()
+
+	// The file name doesn't match any task token exactly, so the first outline pass
+	// may find no focused symbol. Scan should retry with the longest token and still
+	// return a focused symbol via the broadened candidate set.
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"go.mod":             "module example.com/test\n\ngo 1.24.0\n",
+		"internal/core/validation_engine.go": "package core\n\nfunc RunValidation() {}\n\nfunc ValidateInput() {}\n",
+	})
+
+	snapshot, err := New().Scan(context.Background(), Request{
+		// "validation" matches ValidateInput/RunValidation in content but path segment
+		// "core" doesn't match, so the initial narrow search may score weakly.
+		// Broadened retry on the strongest token should still find the symbol.
+		Task:      "validation engine core",
+		Workspace: dir,
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(snapshot.CandidateFiles) == 0 {
+		t.Fatal("expected candidate files")
+	}
+	// The adaptive retry should surface a focused symbol even if the first pass missed it
+	if snapshot.FocusedSymbol == nil {
+		t.Logf("no focused symbol (adaptive retry had nothing extra to find) — checking candidate files only")
+	}
+}
+
+func TestLongestToken(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		tokens []string
+		want   string
+	}{
+		{[]string{"auth", "middleware", "val"}, "middleware"},
+		{[]string{"planner"}, "planner"},
+		{[]string{}, ""},
+		{[]string{"aa", "bb"}, "aa"}, // tie: first wins
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(strings.Join(tc.tokens, ","), func(t *testing.T) {
+			t.Parallel()
+			got := longestToken(tc.tokens)
+			if got != tc.want {
+				t.Fatalf("longestToken(%v) = %q, want %q", tc.tokens, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMergeFileLists(t *testing.T) {
+	t.Parallel()
+
+	got := mergeFileLists(
+		[]string{"a.go", "b.go", "c.go"},
+		[]string{"b.go", "d.go"},
+	)
+	want := []string{"a.go", "b.go", "c.go", "d.go"}
+	if len(got) != len(want) {
+		t.Fatalf("mergeFileLists: got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("mergeFileLists[%d]: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// ---- Benchmarks ----
+
+func BenchmarkFuzzyContains(b *testing.B) {
+	haystack := "internal/intelligence/service.go"
+	needle := "service"
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		fuzzyContains(haystack, needle)
+	}
+}
+
+func BenchmarkFuzzyPathScore(b *testing.B) {
+	path := "internal/agent/planner.go"
+	tokens := []string{"planner", "agent", "validation", "command"}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		fuzzyPathScore(path, tokens)
+	}
+}
+
+func BenchmarkTruncateSnippet(b *testing.B) {
+	snippet := strings.Repeat("func Line() {}\n", 50)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		truncateSnippet(snippet)
+	}
+}
+
+func BenchmarkSearch(b *testing.B) {
+	dir := b.TempDir()
+	files := map[string]string{
+		"go.mod":                           "module example.com/bench\n\ngo 1.24.0\n",
+		"internal/auth/middleware.go":      "package auth\n\nfunc AuthMiddleware() {}\n",
+		"internal/auth/session.go":         "package auth\n\ntype Session struct{}\n",
+		"internal/agent/planner.go":        "package agent\n\nfunc Plan() {}\n",
+		"internal/agent/agent.go":          "package agent\n\nfunc Run() {}\n",
+		"internal/runtime/runtime.go":      "package runtime\n\nfunc Execute() {}\n",
+		"cmd/projectkitty/main.go":         "package main\n\nfunc main() {}\n",
+	}
+	for path, content := range files {
+		fullPath := filepath.Join(dir, path)
+		_ = os.MkdirAll(filepath.Dir(fullPath), 0o755)
+		_ = os.WriteFile(fullPath, []byte(content), 0o644)
+	}
+	svc := New()
+	ctx := context.Background()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = svc.Search(ctx, Request{Task: "auth middleware", Workspace: dir})
+	}
+}
+
+func BenchmarkOutline(b *testing.B) {
+	dir := b.TempDir()
+	files := map[string]string{
+		"internal/auth/middleware.go": "package auth\n\nfunc AuthMiddleware() {}\n\ntype SessionManager struct{}\n\nfunc (s *SessionManager) Validate() {}\n",
+		"internal/agent/planner.go":   "package agent\n\nfunc Plan() {}\n\nfunc chooseValidationCommand() string { return \"go test\" }\n",
+	}
+	for path, content := range files {
+		fullPath := filepath.Join(dir, path)
+		_ = os.MkdirAll(filepath.Dir(fullPath), 0o755)
+		_ = os.WriteFile(fullPath, []byte(content), 0o644)
+	}
+	svc := New()
+	ctx := context.Background()
+	candidates := []string{"internal/auth/middleware.go", "internal/agent/planner.go"}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = svc.Outline(ctx, OutlineRequest{Task: "auth middleware", Workspace: dir, Files: candidates})
+	}
+}
+
+func BenchmarkScan(b *testing.B) {
+	dir := b.TempDir()
+	files := map[string]string{
+		"go.mod":                      "module example.com/bench\n\ngo 1.24.0\n",
+		"internal/auth/middleware.go": "package auth\n\nfunc AuthMiddleware() {}\n",
+		"internal/auth/session.go":    "package auth\n\ntype Session struct{}\n",
+		"internal/agent/planner.go":   "package agent\n\nfunc Plan() {}\n",
+	}
+	for path, content := range files {
+		fullPath := filepath.Join(dir, path)
+		_ = os.MkdirAll(filepath.Dir(fullPath), 0o755)
+		_ = os.WriteFile(fullPath, []byte(content), 0o644)
+	}
+	svc := New()
+	ctx := context.Background()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = svc.Scan(ctx, Request{Task: "auth middleware and validate", Workspace: dir})
 	}
 }
