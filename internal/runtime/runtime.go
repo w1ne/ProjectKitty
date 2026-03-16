@@ -11,14 +11,17 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/w1ne/projectkitty/internal/intelligence"
 )
 
 type Tool string
 
 const (
-	ToolShell     Tool = "shell"
-	ToolReadFile  Tool = "read_file"
-	ToolListFiles Tool = "list_files"
+	ToolShell      Tool = "shell"
+	ToolReadFile   Tool = "read_file"
+	ToolReadSymbol Tool = "read_symbol"
+	ToolListFiles  Tool = "list_files"
 )
 
 type Policy struct {
@@ -32,6 +35,7 @@ type Call struct {
 	Workspace string
 	Command   string
 	Path      string
+	Symbol    string
 	Limit     int
 }
 
@@ -58,6 +62,8 @@ func (r *Runtime) Execute(ctx context.Context, call Call) (Result, error) {
 		return r.runShell(ctx, call)
 	case ToolReadFile:
 		return r.readFile(call)
+	case ToolReadSymbol:
+		return r.readSymbol(call)
 	case ToolListFiles:
 		return r.listFiles(call)
 	default:
@@ -126,6 +132,24 @@ func (r *Runtime) readFile(call Call) (Result, error) {
 		Tool:    ToolReadFile,
 		Summary: fmt.Sprintf("Read %d bytes from %s.", len(content), call.Path),
 		Output:  string(content),
+	}, nil
+}
+
+func (r *Runtime) readSymbol(call Call) (Result, error) {
+	content, err := os.ReadFile(filepath.Join(call.Workspace, call.Path))
+	if err != nil {
+		return Result{}, err
+	}
+
+	symbol := intelligence.FindSymbol(string(content), call.Path, call.Symbol)
+	if symbol == nil {
+		return Result{}, fmt.Errorf("symbol %q not found in %s", call.Symbol, call.Path)
+	}
+
+	return Result{
+		Tool:    ToolReadSymbol,
+		Summary: fmt.Sprintf("Read symbol %s from %s.", call.Symbol, call.Path),
+		Output:  symbol.Snippet,
 	}, nil
 }
 

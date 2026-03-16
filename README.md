@@ -2,6 +2,8 @@
 
 ProjectKitty is an open-source terminal coding agent focused on practical repository inspection, controlled execution, durable memory, and a responsive terminal UI.
 
+Architecture and article notes live under [`docs/articles/`](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/docs/articles/), including [`ARTICLE_1_FOUNDATIONS.md`](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/docs/articles/ARTICLE_1_FOUNDATIONS.md) and [`ARTICLE_2_READING_CODE.md`](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/docs/articles/ARTICLE_2_READING_CODE.md).
+
 The current implementation includes:
 
 - planner
@@ -16,6 +18,7 @@ Right now the focus is the agentic loop and clean subsystem boundaries rather th
 
 - understands a task and runs a deterministic meow loop
 - gathers focused repository context without reading every file
+- reads the best matching symbol before running validation
 - executes typed runtime actions with explicit policy checks
 - persists session logs and project facts under `.projectkitty/`
 - streams status through a Bubble Tea interface
