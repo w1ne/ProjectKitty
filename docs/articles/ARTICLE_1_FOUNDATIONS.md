@@ -1,266 +1,137 @@
-# Article 1: Foundations — What a Coding Agent Actually Needs
+# Article 2: What a Coding Agent Actually Reads: Cutting the Noise
 
-When I first got into AI, I built Craftydraft, an automatic article generator. You gave it a topic, the AI wrote an article, then it waited. That was the whole loop: prompt in, text out, human back in the driver's seat.
+In the first article, we outlined the general architecture of ProjectKitty. Now, let's give it its first task.
 
-It died. The output was not bad, but it could not keep going in the agent economy. Every turn reset to zero. It had no memory of what it had tried, no way to notice when something failed, and no mechanism for doing the next logical thing without being explicitly asked. It was a wrapper.
+Task: *inspect the planner validation command*.
 
-We are not building a wrapper.
+Let's run it both ways against the actual ProjectKitty repository.
 
-An agent is something different: a system that can inspect a repository, choose the next action, run tools, observe results, and maintain enough state to continue without restarting from scratch on every turn.
+**The Naive Approach:** Scan every `.go` file containing any of the words `planner`, `validation`, `command`, `run`, or `test`.
 
-That is what this series builds.
+* **Result:** 13 files, 29,465 tokens of raw source.
+* **The Catch:** The top three files by token-hit count were `service_test.go`, `agent_test.go`, and `planner_test.go` — all test files. The file with the actual answer, `planner.go`, ranked 7th.
 
-An open-source CLI agent, codename **ProjectKitty**, designed to be logical, fast, safe, and practical for real software work. We are using **Go** for the runtime and **Bubble Tea** for the terminal UI. The bigger point is architectural: clear boundaries between planning, code intelligence, execution, memory, and presentation.
+Gemini 2.0 Flash read all of it and found the right answer. It correctly identified that the command is determined by the `chooseValidationCommand` function in `internal/agent/planner.go`.
 
-By the end of the series, we will have a working CLI agent that can:
+The model is capable. But it burned 29,000 tokens to get there, mostly on test file noise that had nothing to do with the question.
 
-- inspect code semantically instead of reading files blindly
-- execute terminal actions with guardrails
-- persist project memory across sessions
-- stream its state through a responsive terminal UI
+That is why I built **Whiskers**, the local code-reading and context-gathering layer for **ProjectKitty** (our open-source CLI coding agent). Instead of blindly dumping entire files into the model's context window, Whiskers acts as a highly disciplined filter. It uses fast local search combined with syntax-aware parsing (via Tree-sitter) to extract specific, relevant symbols, drastically reducing the noise before the model ever sees it.
 
-## Best Practices Before We Start
+**The Whiskers Approach on the same task:**
 
-We keep planning, execution, memory, and rendering as separate concerns. **ReAct** supports interleaving reasoning and action instead of treating tool use as a separate afterthought.
+```text
+Candidate files (5):
+  internal/agent/planner.go
+  cmd/projectkitty/main.go
+  internal/ui/model.go
+  internal/agent/agent.go
+  internal/intelligence/service.go
 
-We prefer typed tools over free-form shell behavior. **Toolformer** supports exposing tools through explicit call boundaries with defined inputs and outputs.
+Focused symbol: chooseValidationCommand in internal/agent/planner.go (confidence 72)
 
-We treat safety policy as part of the runtime, not as prompt text. **SWE-agent** supports the idea that interface design strongly affects agent performance in software engineering tasks.
+Snippet:
+func chooseValidationCommand(state State) string {
+    if state.SearchTool != nil && state.SearchTool.Result != nil && state.SearchTool.Result.HasGoModule {
+        return "go test ./..."
+    }
+// ... [truncated for brevity]
 
-We keep both human-readable memory and structured operational state, and we make extensibility plug into the same tool model instead of bypassing it.
-
-## 1. The Agentic Loop
-
-Real coding work follows a pattern that wrappers cannot handle:
-
-1. locate the relevant files
-2. inspect a few symbols
-3. run a command
-4. interpret the output
-5. decide what to do next
-6. remember what was just learned
-
-```mermaid
-flowchart LR
-    A[Locate the relevant files] --> B[Inspect a few symbols]
-    B --> C[Run a command]
-    C --> D[Interpret the output]
-    D --> E[Decide what to do next]
-    E --> F[Remember what was just learned]
 ```
 
-An agent manages the full sequence as a system. That is not just a matter of "more intelligence." It is a matter of tighter control over state, tools, and iteration. The intelligence is almost secondary. The loop is the product.
+The planner receives the summary and focused snippet—roughly 300 tokens. **Same answer, 100x cheaper.**
 
-## 2. The Five Subsystems
+The argument for Whiskers is not that the model fails without it. On a clean question against a small repo, a capable model finds the right answer even in 30K tokens of noise. The argument is what happens at scale. A 20-turn agent session running naive search at 29K tokens per turn costs ~$2 per task at current API rates. On a 50,000-file repository, the naive file list simply stops fitting in the context window.
 
-If we want this project to stay understandable as it grows, the architecture has to be split into clear parts.
+Whiskers exists to keep the per-turn cost low enough that the agent loop can actually run. Its job is to deliver the exact function directly, without making the model dig for it.
 
-```mermaid
-flowchart TD
-    U[User Request]
-    P[Planner]
-    C[Code Intelligence]
-    T[Tool Runtime]
-    M[Memory]
-    UI[Terminal UI]
+---
 
-    U --> P
-    P --> C
-    P --> T
-    P --> M
-    P --> UI
-```
+## 1. Retrieval Is a Filtering Problem
 
-### Planner
+Before the model can reason, the agent needs to answer four smaller questions: *Which files are relevant? Which functions live inside them? Which region should be shown? What can be ignored?* That's a retrieval problem. It isn't vector search or semantic magic; it's a disciplined local pipeline that converts a vague task into a short list of likely code locations.
 
-The planner decides what should happen next. It does not edit files or run commands directly. It produces the next action based on the current user request, recent observations, and remembered project context.
+Here is the pipeline Whiskers runs, broken down into three phases:
 
-### Code Intelligence
+**Phase 1: Broad Search & Ranking**
 
-The code intelligence layer answers questions like:
+* **Tokenize:** Convert the task into search terms.
+* **First Pass:** Run `ripgrep` across the workspace (or `git ls-files`/directory walk, skipping common build directories).
+* **Second Pass:** Re-search using names derived from the first slice (file base names, symbol names) to pull in structurally related files that keyword search missed.
+* **Score & Rank:** Evaluate by path match, content match, symbol overlap, and fuzzy path subsequence matching. Keep the top five.
 
-- where is the relevant symbol
-- what function or class should be extracted
-- what files are probably related
+**Phase 2: Precision Extraction**
 
-This layer exists so the planner does not have to dump entire files into the model every time it needs context.
+* **Extract Symbols:** Pull functions, types, and snippets (capped at 20 lines) from likely files.
+* **Match:** Score symbols against task tokens. Require a structural name match before declaring a "focused hit." (If none is found, retry once using the single longest task token).
+* **Trace:** Map related files around the strongest symbol (same package, imports it uses).
 
-### Tool Runtime
+**Phase 3: Final Outline & Guardrails**
 
-The runtime executes actions in the local environment: shell commands, file reads, edits, tests, and any external tools we expose later. It is responsible for safety, process handling, output capture, and cancellation.
+* **Read & Outline:** Read the focused symbol in full and outline related files for one cross-file hop.
+* **Budget Check:** Emit `context_window_will_overflow` if the estimated token cost exceeds 40K, or emit `loop_detected` to stop if the session exceeds turn limits.
 
-This is consistent with both Claude Code and Codex: the best systems expose a runtime with explicit tool types, execution boundaries, and policy checks.
+Compare that pipeline to simply telling the model, "Here are ten files that contain the word *test*." With Whiskers, the model gets the exact function.
 
-### Memory
+---
 
-The agent needs both short-term and long-term memory. Short-term memory tracks the current turn and recent tool results. Long-term memory stores durable project facts, decisions, and checkpoints that should survive across sessions.
+## 2. Symbol Extraction and the Interface Boundary
 
-That split is directly supported by the research. Claude Code combines JSONL session history, persistent project memory, and indexed metadata, while Codex points toward a structured state database for resumable work and cross-session tracking.
+Candidate files are not enough. Handing full files to the planner just shifts the noise problem one level down.
 
-### Terminal UI
+Whiskers extracts symbols using Tree-sitter grammars for major languages (Go, Java, JS/TS, Python, Rust, etc.), falling back to regex for unsupported files. So instead of a raw file path, the planner gets:
 
-The UI is not decoration. It is how the system explains what it is doing, what it is waiting on, and where it is blocked. If the interface lags or hides state, the whole agent feels unreliable.
+* `internal/agent/planner.go`
+* **Symbols:** `chooseValidationCommand`, `NewPlanner`, `DefaultPlanner.Next`
 
-One important design implication from the Codex research is that these parts should communicate through clear message boundaries. Whether that becomes channels inside one process or IPC between multiple processes later, the architecture should assume that planning, execution, and rendering are decoupled systems.
+That changes the model's next action from *"maybe read the whole file"* to *"read this specific symbol."*
 
-## 3. Choosing the Stack: Go + Bubble Tea
+**Two critical behaviors make this work:**
 
-We are choosing **Go** because it is a strong fit for a terminal-first agent:
+1. **Snippet truncation:** Snippets are capped at 20 lines. Full function bodies can run thousands of tokens; Whiskers handles budget control at the extraction layer, before the model ever sees the context.
+2. **Weak match rejection:** If the outline can't produce a symbol name containing a task token, it tells the planner: "No strong symbol match yet." Agents often fail by reading something nearby and acting overly confident. Whiskers refuses to guess.
 
-- it compiles to a single binary
-- it handles concurrency well
-- it works cleanly across macOS, Linux, and Windows
-- it is well suited to process management, streams, and local tooling
+The interface that wraps this stays deliberately small:
 
-We are choosing **Bubble Tea** because the agent is naturally event-driven. Tool starts, tool output, user input, cancellations, progress updates, and completion states all map well to a message-based UI loop.
+* `Search(task, workspace)` → candidate files
+* `Outline(task, workspace, files)` → symbols, focused match, related files
+* `ReadSymbol(workspace, path, name)` → symbol content
 
-That separation matters. The planner and runtime should keep working even if the screen is redrawn a hundred times per second. Bubble Tea gives us a clean way to keep rendering responsive while background work continues elsewhere.
+This boundary matters. The moment Whiskers starts "reasoning" about what the user wants, you have two planners arguing. Whiskers provides the `ContextSnapshot`; the planner decides how to solve the task.
 
-For the first implementation, we can keep this inside one Go application. But the architecture should still leave room for a future split between UI and agent runtime if we need stronger isolation, background execution, or remote control later.
+---
 
-```mermaid
-flowchart TD
-    U[User Input] --> P[Planner]
-    P --> T[Tool Runtime]
-    P --> M[Memory]
-    P --> S[Status Updates]
-    T --> S
-    S --> R[Render]
-```
+## 3. Budgets, Benchmarks, and Evolution
 
-## 4. Reading Code Without Reading Everything
+The filtering is cheap. The overhead of narrowing context is far smaller than the API cost of reading everything.
 
-A coding agent that only reads raw files is noisy, expensive, and slow. If the user says "fix the auth middleware," the agent should not need to read every line of every authentication-related file just to find the right function.
+* **Fuzzy path scoring:** ~36 ns per call (zero allocations).
+* **Two-file outline pass:** ~839 µs.
+* **Full search pass (including I/O):** ~8 ms.
 
-The better approach is local code intelligence:
+We also use per-extension heuristics for token estimation (code files = bytes/3; prose = bytes/5). This makes the 40K overflow threshold highly accurate. The `context_window_will_overflow` event isn't a silent truncation after the fact; it's a typed signal the planner can react to *before* hitting a hard model limit.
 
-- fast text search to find candidate files
-- syntax-aware parsing to identify functions, classes, methods, and blocks
-- targeted extraction of the smallest useful code region
+### Where It Still Gets It Wrong
 
-This is where tools like **Tree-sitter** matter. They let us ask structural questions about code instead of relying only on line ranges and keyword matches.
+Whiskers isn't perfect. For example, if a user asks, *"How does the agent decide when to stop?"* (tokens: `agent`, `decide`, `stop`), Whiskers struggles.
 
-That does not make the agent "smart" by itself. It makes the context pipeline efficient. The model sees less noise and more of the code that actually matters.
+Because the tokens are broad, Whiskers scores the massive `agent.go` file highest. It finds the outer loop function (`Run`) instead of the specific two-line check (`if state.Steps >= maxSessionTurns`). The planner gets the whole `Run` function rather than just the six relevant lines. Short tasks with generic verbs are our consistent weak case because lexical scoring can't separate "a function containing a loop" from "the loop's exit condition."
 
-```mermaid
-flowchart TD
-    A[User asks to fix auth middleware]
-    A --> B[Search likely files]
-    B --> C[Parse syntax tree]
-    C --> D[Extract relevant symbol]
-    D --> E[Small focused context]
-```
+Additionally, ranking is purely lexical/structural (no embeddings or call graphs yet), and Tree-sitter extraction still misses anonymous functions or complex decorators.
 
-## 5. Why Safe Execution Matters
+### The Model-Driven Planner
 
-Reading code is only half the system. A useful agent also needs to act: run tests, inspect logs, list files, invoke package managers, and eventually edit code.
+To navigate these edge cases, ProjectKitty uses a **model-driven planner**. Instead of following a hardcoded sequence, the planner exposes Whiskers' capabilities as callable tools (`search_repository`, `inspect_symbol`, `run_command`, etc.).
 
-That immediately raises two engineering problems:
+This allows the model to navigate the codebase iteratively based on the current state—much like Claude Code or the Gemini CLI. If Whiskers misses the exact line on the first pass, the planner can adjust its search parameters and try again until it finds what it needs.
 
-- terminal programs are messy
-- unrestricted execution is dangerous
+---
 
-Terminal programs are messy because many developer tools expect a real terminal, not a bare subprocess pipe. They emit ANSI sequences, ask interactive questions, and behave differently depending on terminal size and capabilities.
+## What's Next
 
-Execution is dangerous because an agent should not be able to treat every shell command as equally safe. The runtime needs explicit guardrails around risky operations, clear visibility into what is being executed, and predictable cancellation behavior.
+Before ProjectKitty acts on a codebase, it needs to see it clearly enough to choose sensible actions. Whiskers handles that now.
 
-A serious agent needs policy as a first-class concept:
+In Article 3, we will build the runtime: executing commands safely, streaming output, handling interactive terminal behavior, and enforcing policy boundaries around operations that can't be undone.
 
-- different approval modes for different environments
-- sandboxed and non-sandboxed execution paths
-- runtime flags for destructive behavior and expanded access
-- a clear record of what policy was active when a command ran
+---
 
-We will handle those concerns later in the series with a PTY-backed runtime and a permission model. For now, the foundation is simple: execution belongs in a controlled subsystem, not mixed into ad hoc prompt logic.
-
-```mermaid
-flowchart TD
-    P[Planner requests command] --> G{Policy check}
-    G -->|Safe| X[Execute in PTY]
-    G -->|Needs approval| A[Ask user]
-    A -->|Approved| X
-    A -->|Rejected| R[Return refusal]
-    X --> O[Stream output]
-```
-
-## 6. Memory, or Why Every Turn Shouldn't Feel Like the First
-
-Without memory, every turn becomes a partial restart. The agent asks questions you already answered. It inspects files it already read. It forgets the decision it made three steps ago and proposes the same approach it just discarded.
-
-Longer tasks need a record of what was asked, what was inspected, what was run, what was concluded, and which decisions should carry forward to the next session. That requires at least two layers:
-
-- a session log for traceability and recovery
-- a project memory store for durable knowledge
-
-We will add compaction later so the system can summarize old activity into reusable facts instead of dragging a full transcript indefinitely.
-
-`MEMORY.md` style notes are good for human-readable context, but they are not enough for operational state. We will use a small structured store, likely SQLite, for session metadata, checkpoints, and resumable jobs.
-
-```mermaid
-flowchart TD
-    T[Current turn] --> S[Session log]
-    S --> C[Compaction]
-    C --> P[Project memory]
-    P --> N[Next session starts with context]
-```
-
-## 7. The Meow Loop
-
-Once the subsystems are separated, the ProjectKitty agent loop becomes easy to describe:
-
-1. understand the user request
-2. gather the smallest useful context
-3. choose the next action
-4. execute it
-5. observe the result
-6. update memory and state
-7. continue or stop
-
-This is the core of the project.
-
-Not a giant `while(true)`, and not "just call the model again." It is a controlled state machine with explicit boundaries between deciding, doing, and remembering.
-
-```mermaid
-flowchart TD
-    A[Understand request] --> B[Gather context]
-    B --> C[Choose action]
-    C --> D[Execute]
-    D --> E[Observe result]
-    E --> F[Update memory and state]
-    F --> G{Continue?}
-    G -->|Yes| B
-    G -->|No| H[Stop]
-```
-
-## 8. Tools Are Not Shell Commands
-
-Another useful lesson from agents like Codex is that the tool layer should not be treated as a bag of shell commands. It should be a typed interface with clear capabilities and predictable outputs.
-
-At minimum, our agent should distinguish between:
-
-- filesystem inspection tools
-- shell and PTY execution tools
-- edit and patch tools
-- web or external lookup tools
-- image or artifact viewers when needed
-
-That tool model also creates a clean extensibility path. If we later add MCP integrations or a lightweight skills system, those features should plug into the same action model.
-
-Instead of hardcoding every workflow into the core binary, we can package domain-specific instructions, scripts, and templates as optional modules. That gives us a way to extend the agent without bloating the core loop.
-
-## 9. What This Series Will Build
-
-To keep the project logical, each article will add one major capability:
-
-1. Article 1 defines the system and the boundaries.
-2. Article 2 builds semantic code reading and fast context extraction.
-3. Article 3 builds safe execution with PTYs, streaming output, and concurrency.
-4. Article 4 adds memory, checkpoints, and compaction.
-5. Article 5 assembles the full orchestration loop and Bubble Tea UI.
-6. Article 6 covers delegation, integrations, and production concerns.
-
-## What's Next?
-
-In Article 2, we will build the code-reading layer. That means combining fast repository search with syntax-aware extraction so the agent can answer questions like "where is this implemented?" and "show me only the function that matters" without flooding the model with irrelevant context.
-
-This article was prepared by Andrii Shylenko for Entropora, Inc.
+*Article 2 is live. Implementation in progress: [github.com/w1ne/ProjectKitty*](https://github.com/w1ne/ProjectKitty) *Follow Entropora, Inc for Article 3.*
