@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -44,14 +45,8 @@ func main() {
 		planner,
 		intelligence.New(),
 		runtime.New(runtime.Policy{
-			ApprovalMode: "on-failure",
-			AllowedCommands: []string{
-				"go test ./...",
-				"go test ./... -run TestDoesNotExist",
-				"git status --short",
-				"ls",
-				"pwd",
-			},
+			ApprovalMode:      "auto",
+			InactivityTimeout: 90 * time.Second,
 		}),
 		store,
 	)

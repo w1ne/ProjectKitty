@@ -193,12 +193,15 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 				if cmd == "" {
 					cmd = chooseValidationCommand(state)
 				}
+				events <- newEvent(EventAction, step, "Runtime action", cmd)
 				call := runtime.Call{
 					Tool:      runtime.ToolShell,
 					Workspace: input.Workspace,
 					Command:   cmd,
+					Stream: func(execID, line string) {
+						events <- newEvent(EventObserved, step, execID, line)
+					},
 				}
-				events <- newEvent(EventAction, step, "Runtime action", cmd)
 				result, err := a.runtime.Execute(ctx, call)
 				if err != nil {
 					events <- newErrorEvent(step, "Execute command", err)
