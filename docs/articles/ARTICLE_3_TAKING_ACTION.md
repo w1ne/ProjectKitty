@@ -44,43 +44,80 @@ But before we write code, it's worth looking at what the three most mature CLI a
 
 ## 1. What Claude Code, Codex, and Gemini Do
 
-The execution layer is where the biggest differences between agents show up. Here is what each one actually implements.
+The execution layer is where the biggest differences between agents show up. Here is what each one actually implements, with evidence levels noted: **Source** (read directly from binary or unminified source), **Benchmark** (observed behavior), **Inferred** (engineering conclusion).
 
 ### Claude Code — PTY + UUID Correlation + Environment Sterilization
 
-Claude Code does not call `exec`. It uses `node-pty` to spawn every command inside a pseudoterminal, for the same reason we're building Claws. What makes its approach notable is the extra layers on top of the PTY:
+**Source.** Claude Code does not call `exec`. It uses `node-pty` to spawn every command inside a pseudoterminal — confirmed by direct string evidence in the 225 MB native binary. What makes its approach notable is the extra layers on top of the PTY:
 
-**Environment sterilization.** Before the child process starts, Claude snapshots its environment and strips internal variables — API keys, internal credential paths, agent control variables. The subprocess gets a clean environment that can't accidentally leak or misuse the parent's credentials.
+**Environment sterilization.** Before the child process starts, Claude snapshots its environment (`~/.claude/shell-snapshots/` exists on disk for this purpose) and strips internal variables — API keys, internal credential paths, agent control variables. The subprocess gets a clean environment that can't accidentally leak or misuse the parent's credentials.
 
 **`TERM_PROGRAM=claude-code`.** Claude sets this in every subprocess. Tools that check it can suppress heavy animations, disable interactive prompts, or change their output format to be more machine-readable. It's a signal: *you are running under supervision, behave accordingly*.
 
-**UUID-tagged output.** Every command execution gets a `latestBashOutputUUID` — a random identifier that is injected into the output stream and matched against the model's expected response. This prevents a subtle class of bugs where the model confuses output from a previous turn with the current one. When a command takes thirty seconds and the model's next turn arrives before it finishes, the UUID ensures the observation is correctly associated.
+**UUID-tagged output.** Every command execution gets a `latestBashOutputUUID` — a random identifier injected into the output stream and matched against the model's expected response. This prevents a subtle class of bugs where the model confuses output from a previous turn with the current one. When a command takes thirty seconds and the model's next turn arrives before it finishes, the UUID ensures the observation is correctly associated.
 
-**`isBashSecurityCheckForMisparsing`.** Before execution, Claude scans the generated command string for patterns that suggest injection — multi-command chains where one segment looks like it came from external input, variable expansions into sub-shells (`$()`), and similar constructions. The model is capable; it can still be tricked by a sufficiently crafted repository file. This check runs regardless.
+**SHA256 permission hashing.** The permission system hashes approved command patterns. Each permission mode (`default`, `auto`, `bypassPermissions`) gates tool calls before any OS call is made. This is agent-layer interception: in `don't ask` mode, even a `Read` call is denied before it reaches the filesystem — **Benchmark** shows no output file was produced in the safety boundary test. The cost is that bypassing the mode check bypasses the safety system entirely.
 
-### Codex — Streaming Lifecycle + Bubblewrap Sandbox
+**`isBashSecurityCheckForMisparsing`.** Before execution, Claude scans the generated command string for injection patterns — multi-command chains where one segment looks like it came from external input, variable expansions into sub-shells (`$()`), and similar constructions. The model is capable; it can still be tricked by a sufficiently crafted repository file. This check runs regardless.
+
+### Codex — OS-Layer Enforcement + Streaming Lifecycle + Bubblewrap
 
 Codex's clearest architectural signal is visible in its event names: `exec_command_begin`, `exec_command_output_delta`, `exec_command_end`. Command execution is not a call that returns a result — it's a lifecycle with typed state transitions. Every observer (the UI, the logger, the policy layer) can subscribe to these events independently.
 
-The second notable piece is bubblewrap. On Linux, Codex runs commands inside `bwrap` — the same userspace container tool used by Flatpak and Chromium's sandbox. The command gets a restricted filesystem view and network policy. The agent can read and write within the workspace and run builds, but cannot touch paths it shouldn't. If the model is tricked into running `cat /etc/shadow`, the OS enforces the restriction; the agent reports what happened; no separate blocklist is needed.
+**OS-layer vs agent-layer safety.** This is the key distinction from Claude. **Benchmark:** In a safety boundary test, Codex attempted `cat /etc/shadow`, received `Permission denied` from the OS, and then successfully wrote `safety_report.md` documenting what happened. The agent reached the filesystem; the OS said no; the agent reported it. Write was not blocked at the agent layer. The bubblewrap sandbox (`bwrap`) on Linux provides explicit, inspectable containment — the command gets a restricted filesystem view and the OS enforces it. No separate blocklist is needed because the kernel is the enforcer.
 
-Codex also maintains an `exec_command_failed: ` and `write_stdin failed: ` error surface. The `write_stdin` capability in particular means Codex can respond to interactive prompts — it knows when a command is waiting for input and can write to its stdin. Buffered `os/exec` cannot do this at all.
+**Explicit agent lifecycle.** Codex exposes `spawn_agent → resume_agent → send_message → close_agent` as first-class operations. Each agent is an object with an ID. Context forking allows a sub-agent to inherit parent conversation history. The orchestration is the public interface, not an implementation detail.
 
-### Gemini — Process Group Tracking + Inactivity Timeout + Command Splitting
+**`write_stdin` capability.** Codex maintains an explicit `write_stdin` path alongside `exec_command_failed`. This means Codex can respond to interactive prompts — it knows when a command is waiting for input and can write to its stdin. Buffered `os/exec` cannot do this at all.
 
-Gemini's `ShellTool` wraps every command before it runs:
+### Gemini — Full Policy Engine + Widest Sandbox Coverage
+
+Gemini has the most layered execution safety architecture of the three. Every tool invocation travels through a typed decision pipeline:
+
+```
+tool invocation
+  → shouldConfirmExecute()
+  → PolicyEngine.getDecision()    [via MessageBus — 30-second timeout]
+  → ALLOW | DENY | ASK_USER
+  → if ASK_USER: getConfirmationDetails() → typed UI
+  → user: confirm / deny / always allow
+  → if ProceedAlwaysAndSave → persist rule to ~/.gemini/policies/ (JSON or TOML)
+```
+
+The `PolicyEngine` evaluates rules with four fields: `toolName` (exact match or `serverName__*` wildcard for MCP), `argsPattern` (regex against JSON-stringified args), `modes[]` (rule applies only in specified modes), and `priority` (explicit ordering). Rules persist across restarts — "always allow `npm test`" survives a session restart.
+
+**Four `ApprovalMode`s, not three.** Unlike most agents that offer two or three modes, Gemini has four:
+
+| Mode | Behavior |
+|------|----------|
+| `DEFAULT` | Ask for most operations |
+| `PLAN` | Read-only tools only — enforced by prompt rewrite |
+| `AUTO_EDIT` | Auto-approve file edits, ask for shell |
+| `YOLO` | Approve everything |
+
+`PLAN` mode does something unusual: it physically rewrites the system prompt to inject a 5-phase sequential workflow and registers a hardcoded `PLAN_MODE_DENIAL_MESSAGE` in the tool scheduler for any write attempt. This is behavioral gating via prompt engineering on top of a policy check — not just a permission flag.
+
+**Shell command policy.** `checkShellCommand()` runs the same command-splitting Gemini is known for, but the policy context is richer:
 
 ```bash
 { <user-command> }; __code=$?; pgrep -g 0 >${tempFile} 2>&1; exit $__code;
 ```
 
-After the user's command exits, this snippet writes every PID in the process group to a temp file. Gemini reads that file and can kill all of them — not just the immediate child. This solves the process group leak that `os/exec` leaves behind when `bash -lc "make all"` spawns a compiler that ignores SIGTERM.
+After the user's command exits, this snippet writes every PID in the process group to a temp file. Gemini reads that file and kills all of them — not just the immediate child. Any command containing `>` or `>>` is automatically downgraded to require confirmation in all modes except `YOLO`. Deceptive URLs in tool confirmations trigger an explicit warning in the UI (added v0.31.0).
 
-**Inactivity timeout.** Gemini tracks the last time each command produced output. If no bytes arrive for a configurable duration, it kills the process and returns a timeout error. A hanging `npm install` waiting on a registry that never responds won't keep the agent loop frozen forever.
+**Widest sandbox coverage.** Gemini is the only agent in this set with cross-platform container support:
 
-**Command splitting for policy.** The string `git add . && git commit -m "msg"` contains two distinct operations: a safe read-only file staging and a write that modifies repository history. Gemini's `splitCommands()` breaks the chain on `&&`, `||`, and `;` and evaluates each segment independently against the policy engine. A single "allow git" rule should not implicitly allow `git push --force`.
+| Sandbox | `GEMINI_SANDBOX` | Platform | Mechanism |
+|---------|-----------------|----------|-----------|
+| macOS Seatbelt | `sandbox-exec` | macOS | Apple `sandbox-exec` + customizable `.sb` profiles |
+| Docker | `docker` | Linux/macOS | Versioned container image |
+| Podman | `podman` | Linux/macOS | Drop-in Docker alternative |
+| gVisor | `runsc` | Linux | User-space Go kernel — intercepts all syscalls |
+| LXC/LXD | `lxc` | Linux | Full-system container (experimental) |
 
-**Redirection detection.** Any command containing `>` or `>>` is automatically downgraded to require user confirmation in every mode except `YOLO`. Output redirection can clobber files; that is a write operation even if the command itself is read-only.
+gVisor is the strongest isolation: the container runs inside a user-space Go kernel that intercepts every syscall before it reaches the real kernel. No other tool in this set offers an equivalent. Claude Code has macOS seatbelt only. Codex has Linux bubblewrap. Neither is cross-platform. Claws currently has none.
+
+**`ToolConfirmation` hooks with typed serialized fields.** External processes can intercept every tool decision. An `exec` hook receives `{command, rootCommand}`; an `edit` hook receives `{fileName, filePath, fileDiff, originalContent, newContent, isModifying}`. This enables external governance scripts to implement arbitrary approval logic without modifying the agent.
 
 ---
 
@@ -104,6 +141,9 @@ func (r *Runtime) runShell(ctx context.Context, call Call) (Result, error) {
     // Signal to tools that they're running under agent supervision.
     cmd.Env = append(cmd.Env, "KITTY_SHELL=1", "TERM_PROGRAM=projectkitty")
 
+    // Create a new process group so we can kill all descendants, not just the shell.
+    cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
     started := time.Now().UTC()
     pt, err := pty.Start(cmd)
     if err != nil {
@@ -116,6 +156,7 @@ func (r *Runtime) runShell(ctx context.Context, call Call) (Result, error) {
     execID := newExecID() // UUID for this execution
     var buf bytes.Buffer
     done := make(chan error, 1)
+    outputArrived := make(chan struct{}, 1)
 
     go func() {
         scanner := bufio.NewScanner(pt)
@@ -124,6 +165,11 @@ func (r *Runtime) runShell(ctx context.Context, call Call) (Result, error) {
             buf.WriteString(line + "\n")
             if call.Stream != nil {
                 call.Stream(execID, line)
+            }
+            // Non-blocking signal: inactivity timer resets on each line.
+            select {
+            case outputArrived <- struct{}{}:
+            default:
             }
         }
         done <- scanner.Err()
@@ -135,15 +181,14 @@ func (r *Runtime) runShell(ctx context.Context, call Call) (Result, error) {
     for {
         select {
         case <-ctx.Done():
-            _ = cmd.Process.Kill()
+            _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // kill process group
             return Result{}, ctx.Err()
         case <-inactivity.C:
-            _ = cmd.Process.Kill()
+            _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
             return Result{}, fmt.Errorf("command timed out after %s with no output", r.policy.InactivityTimeout)
-        case err := <-done:
-            _ = err // EOF is normal
+        case <-done:
             goto wait
-        case <-outputArrived: // reset timer on each line
+        case <-outputArrived:
             inactivity.Reset(r.policy.InactivityTimeout)
         }
     }
@@ -172,13 +217,14 @@ wait:
 }
 ```
 
-Five things changed from the buffered version:
+Six things changed from the naive version:
 
 1. **PTY allocation.** `pty.Start` opens the pseudoterminal. The process believes it has a terminal.
-2. **Environment sterilization.** `sterilizeEnv` strips internal agent variables before the child process starts. `KITTY_SHELL=1` tells tools they're running under supervision.
-3. **UUID tagging.** `execID` is generated per execution and travels with the `Result`. The model's observation is always tied to a specific run, not to whatever the most recent output happened to be.
-4. **Inactivity timeout.** The timer resets on every output line. A process that goes silent for longer than `InactivityTimeout` is killed, not waited on forever.
-5. **Context cancellation.** `ctx.Done()` kills the process mid-run. Long builds become cancellable.
+2. **New process group.** `Setpgid: true` puts the child in its own process group. Killing `-cmd.Process.Pid` kills the group — not just the shell. This is Gemini's approach to process group leaks, applied at the `SysProcAttr` level rather than a post-exit `pgrep` scan.
+3. **Environment sterilization.** `sterilizeEnv` strips internal agent variables before the child process starts. `KITTY_SHELL=1` tells tools they're running under supervision.
+4. **UUID tagging.** `execID` is generated per execution and travels with the `Result`. The model's observation is always tied to a specific run, not to whatever the most recent output happened to be.
+5. **Inactivity timeout.** `outputArrived` is a buffered channel written to (non-blocking) on each output line. The timer resets on each write. A process that goes silent for longer than `InactivityTimeout` is killed via process group signal, not just the immediate child.
+6. **Context cancellation.** `ctx.Done()` kills the entire process group mid-run. Long builds become cancellable.
 
 ---
 
@@ -212,7 +258,7 @@ func (r *Runtime) checkPolicy(command string) error {
 }
 ```
 
-**Layer 2: Redirection detection.** Any segment containing `>` or `>>` is blocked in non-`yolo` modes unless explicitly approved. A command that writes to disk is a write operation regardless of what runs before the redirect.
+**Layer 2: Redirection detection.** Any segment containing `>` or `>>` is blocked in non-`yolo` modes. Borrowed from Gemini — a command that writes to disk is a write operation regardless of what runs before the redirect.
 
 **Layer 3: Destructive pattern matching.** If `AllowDestructive` is false, a blocklist of dangerous fragments — `rm`, `git reset`, `git clean`, `sudo`, `chmod` — blocks commands containing them.
 
@@ -239,7 +285,7 @@ func (r *Runtime) checkSegment(segment string) error {
 
 ### Approval Modes
 
-Three modes cover the common cases:
+Three modes cover the common cases. Gemini has four — the missing one is `PLAN`, which rewrites the system prompt to physically prevent the model from requesting write operations. We don't implement that yet, but it's the right direction for a future "read-only audit" mode.
 
 | Mode | Shell | Redirection | Destructive |
 |------|-------|-------------|-------------|
@@ -247,7 +293,11 @@ Three modes cover the common cases:
 | `auto` | Read-only commands free | Blocked | Blocked |
 | `yolo` | Everything | Allowed | Allowed |
 
-The gap between Claws and the production tools is worth naming: Gemini persists "always allow" rules to `~/.gemini/policies/` so they survive session restart. Codex stores `approval_mode` per thread in SQLite. Claws currently rebuilds policy from config on each run. Policy persistence is the next step in this layer's evolution.
+The gap between Claws and the production tools is worth naming directly:
+
+- **Gemini** persists "always allow" rules to `~/.gemini/policies/` (JSON or TOML) with per-tool `argsPattern` regex matching. Rules survive restarts. Users are never prompted for the same approval twice.
+- **Codex** stores `approval_mode` per thread in SQLite with read-repair upsert logic.
+- **Claws** rebuilds policy from config on each run. Users will be re-prompted every session until we add a persistence layer — which is part of the Article 4 work anyway.
 
 ---
 
@@ -365,14 +415,16 @@ Step 4 — ActionRunCommand
   ↓
   sterilizeEnv: strip KITTY_API_KEY, internal vars
   append: KITTY_SHELL=1, TERM_PROGRAM=projectkitty
+  SysProcAttr{Setpgid: true} → new process group
   ↓
   execID = "7f3a2b..."
   pty.Start(bash -lc "go test ./...")
     → process sees a real terminal
     → TERM_PROGRAM tells test runner to suppress animations
     → output arrives incrementally
+    → outputArrived ← struct{}{} on each line (non-blocking)
     → Stream("7f3a2b...", line) → EventObserved events
-    → inactivity timer resets on each line
+    → inactivity timer resets on each outputArrived
   ↓
   cmd.Wait()
     → exit code 0: tests passed
@@ -385,13 +437,13 @@ Step 4 — ActionRunCommand
 
 ### Where It Still Gets It Wrong
 
-**Process group leaks.** Gemini wraps every command with `pgrep -g 0` to collect all spawned PIDs. Claws doesn't do this yet. If `bash -lc "make all"` spawns a compiler that spawns subprocesses, killing the bash process leaves those subprocesses running. The fix is to send `SIGKILL` to the entire process group (`-cmd.Process.Pid`), not just the parent — a one-line change that is missing from the current implementation.
+**No sandbox.** This is the largest gap. Claude has `sandbox-exec` on macOS. Codex has bubblewrap on Linux. Gemini has five sandbox options — including gVisor, which runs the container inside a user-space Go kernel that intercepts every syscall before it reaches the real kernel. Claws runs on the host. The policy gate is defense-in-depth, not isolation. Until we add bubblewrap support, a sufficiently crafted repository file could trick the agent into running something outside the workspace. The blocklist is not a sandbox.
 
-**No sandbox.** Claude has `sandbox-exec` on macOS. Codex has bubblewrap on Linux. Claws runs on the host. The policy gate is defense-in-depth, not isolation. Until we add bubblewrap support, a sufficiently crafted repository file could trick the agent into running something outside the workspace. The blocklist is not a sandbox.
+**No policy persistence.** "Always allow `go test`" resets on restart. Gemini writes rules to `~/.gemini/policies/` in JSON or TOML, with `argsPattern` regex matching so "always allow `git commit`" doesn't also allow `git push`. Codex stores `approval_mode` per thread in SQLite with self-healing upsert logic. Claws rebuilds from config on each run. This is the next step in this layer's evolution.
 
-**Policy doesn't persist.** "Always allow `go test`" resets on restart. Gemini writes rules to `~/.gemini/policies/`; Codex stores `approval_mode` per thread in SQLite. Claws rebuilds from config on each run. This means users will be prompted for the same approvals every session until we add a persistence layer — which is part of the Article 4 work anyway.
+**Fragment matching is naive.** `python script.py` passes the blocklist even if `script.py` deletes files. Defaulting to `manual` mode contains this: nothing runs without explicit allowlist entry. But it is not the same as Codex's bubblewrap or Gemini's gVisor, which enforce restrictions at the OS level regardless of what the agent decides.
 
-**Fragment matching is naive.** `python script.py` passes the blocklist even if `script.py` deletes files. Defaulting to `manual` mode contains this: nothing runs without explicit allowlist entry. But it is not the same as Codex's bubblewrap, which enforces the restriction at the OS level regardless of what the agent decides.
+**No `write_stdin`.** Codex can respond to interactive prompts mid-execution by writing to the running process's stdin. Claws can't. A command waiting for a yes/no response will hit the inactivity timeout and be killed rather than answered. The PTY gives us the infrastructure for this — the master fd is writable — but the planner has no mechanism yet to decide what to write.
 
 ---
 
