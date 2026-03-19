@@ -24,6 +24,7 @@ func main() {
 	task := flag.String("task", "Inspect the repo, identify likely entrypoints, and run the safe validation command.", "task for the agent to execute")
 	workspace := flag.String("workspace", ".", "repository path to inspect")
 	plain := flag.Bool("plain", false, "run without the Bubble Tea UI and print events to stdout")
+	sandbox := flag.String("sandbox", "", "shell sandbox mode: host, auto, or bwrap (overrides PROJECTKITTY_SANDBOX)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -47,6 +48,7 @@ func main() {
 		runtime.New(runtime.Policy{
 			ApprovalMode:      "auto",
 			InactivityTimeout: 90 * time.Second,
+			SandboxMode:       resolveSandboxMode(*sandbox),
 		}),
 		store,
 	)
@@ -73,6 +75,13 @@ func usePlainMode(force bool) bool {
 		return true
 	}
 	return !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
+}
+
+func resolveSandboxMode(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv("PROJECTKITTY_SANDBOX")
 }
 
 func runPlain(ctx context.Context, w io.Writer, app *agent.Agent, input agent.RunInput) error {

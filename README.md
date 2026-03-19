@@ -8,11 +8,11 @@ The current implementation includes:
 
 - planner
 - code intelligence
-- typed tool runtime with policy checks
+- typed tool runtime with policy checks, PTY-backed shell execution, and optional `bubblewrap` sandboxing
 - durable memory
 - Bubble Tea terminal UI
 
-Right now the focus is the agentic loop and clean subsystem boundaries rather than deep code parsing, PTY execution, or model integration.
+Right now the focus is the agentic loop and clean subsystem boundaries rather than production-depth code intelligence or broad model/provider integration.
 
 ## Current Capabilities
 
@@ -20,6 +20,8 @@ Right now the focus is the agentic loop and clean subsystem boundaries rather th
 - gathers focused repository context without reading every file
 - reads the best matching symbol before running validation
 - executes typed runtime actions with explicit policy checks
+- runs shell commands through a PTY with streamed output and inactivity timeouts
+- supports `--sandbox=host|auto|bwrap` for shell execution control
 - persists session logs and project facts under `.projectkitty/`
 - streams status through a Bubble Tea interface
 
@@ -30,6 +32,12 @@ go run ./cmd/projectkitty -task "Inspect the repo and validate the Go test suite
 ```
 
 The current workspace is used as the default target. You can point it at another repository with `-workspace`.
+
+For pragmatic local isolation on Linux, prefer:
+
+```bash
+go run ./cmd/projectkitty --sandbox=auto -task "Inspect the repo and validate the Go test suite."
+```
 
 ## Test
 

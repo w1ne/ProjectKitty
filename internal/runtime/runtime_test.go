@@ -119,6 +119,32 @@ func requiresPTY(t *testing.T) {
 	_ = cmd.Wait()
 }
 
+func requiresBwrap(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skipf("bwrap unavailable in this environment: %v", err)
+	}
+
+	cmd := exec.Command(
+		"bwrap",
+		"--die-with-parent",
+		"--new-session",
+		"--unshare-pid",
+		"--unshare-net",
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--ro-bind-try", "/usr", "/usr",
+		"--ro-bind-try", "/bin", "/bin",
+		"--ro-bind-try", "/lib", "/lib",
+		"--ro-bind-try", "/lib64", "/lib64",
+		"--ro-bind-try", "/etc", "/etc",
+		"bash", "-lc", "true",
+	)
+	if err := cmd.Run(); err != nil {
+		t.Skipf("bwrap not usable in this environment: %v", err)
+	}
+}
+
 func TestPTYRunsCommandAndStreams(t *testing.T) {
 	requiresPTY(t)
 	rt := New(Policy{
@@ -165,6 +191,42 @@ func TestPTYInactivityTimeout(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected inactivity timeout error, got: %v", err)
+	}
+}
+
+func TestRuntimeRejectsUnknownSandboxMode(t *testing.T) {
+	rt := New(Policy{
+		ApprovalMode: "auto",
+		SandboxMode:  "mystery-box",
+	})
+	_, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolShell,
+		Workspace: t.TempDir(),
+		Command:   "pwd",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown sandbox mode") {
+		t.Fatalf("expected unknown sandbox mode error, got: %v", err)
+	}
+}
+
+func TestBwrapSandboxRunsCommand(t *testing.T) {
+	requiresBwrap(t)
+
+	workspace := t.TempDir()
+	rt := New(Policy{
+		ApprovalMode: "auto",
+		SandboxMode:  "bwrap",
+	})
+	result, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolShell,
+		Workspace: workspace,
+		Command:   "pwd",
+	})
+	if err != nil {
+		t.Fatalf("execute in bwrap: %v", err)
+	}
+	if !strings.Contains(result.Output, workspace) {
+		t.Fatalf("expected sandboxed pwd to stay in workspace, got: %q", result.Output)
 	}
 }
 
@@ -418,6 +480,57 @@ func TestRuntimeReadSymbolRejectsAbsolutePathOutsideWorkspace(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected path escape error")
+	}
+	if !strings.Contains(err.Error(), "path escapes workspace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRuntimeReadFileRejectsSymlinkOutsideWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(outsidePath, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	linkPath := filepath.Join(dir, "linked-secret.txt")
+	if err := os.Symlink(outsidePath, linkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	rt := New(Policy{ApprovalMode: "test"})
+	_, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolReadFile,
+		Workspace: dir,
+		Path:      "linked-secret.txt",
+	})
+	if err == nil {
+		t.Fatal("expected symlink escape error")
+	}
+	if !strings.Contains(err.Error(), "path escapes workspace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRuntimeWriteFileRejectsSymlinkParentOutsideWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	linkDir := filepath.Join(dir, "escape")
+	if err := os.Symlink(outsideDir, linkDir); err != nil {
+		t.Fatalf("symlink dir: %v", err)
+	}
+
+	rt := New(Policy{ApprovalMode: "test"})
+	_, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolWriteFile,
+		Workspace: dir,
+		Path:      "escape/pwned.txt",
+		Content:   "nope",
+	})
+	if err == nil {
+		t.Fatal("expected symlink parent escape error")
 	}
 	if !strings.Contains(err.Error(), "path escapes workspace") {
 		t.Fatalf("unexpected error: %v", err)

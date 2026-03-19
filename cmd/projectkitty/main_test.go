@@ -14,6 +14,20 @@ import (
 	"github.com/w1ne/projectkitty/internal/runtime"
 )
 
+func TestResolveSandboxModePrefersFlag(t *testing.T) {
+	t.Setenv("PROJECTKITTY_SANDBOX", "auto")
+	if got := resolveSandboxMode("bwrap"); got != "bwrap" {
+		t.Fatalf("expected flag to win, got %q", got)
+	}
+}
+
+func TestResolveSandboxModeFallsBackToEnv(t *testing.T) {
+	t.Setenv("PROJECTKITTY_SANDBOX", "auto")
+	if got := resolveSandboxMode(""); got != "auto" {
+		t.Fatalf("expected env fallback, got %q", got)
+	}
+}
+
 func TestRunPlainExecutesAgentLoop(t *testing.T) {
 	dir := t.TempDir()
 

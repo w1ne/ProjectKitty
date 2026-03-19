@@ -50,6 +50,7 @@ type Policy struct {
 	AllowedCommands   []string
 	AllowDestructive  bool
 	InactivityTimeout time.Duration
+	SandboxMode       string
 }
 
 type Call struct {
@@ -108,18 +109,20 @@ func (r *Runtime) runShell(ctx context.Context, call Call) (Result, error) {
 	if err := r.checkPolicy(call.Command); err != nil {
 		return Result{}, err
 	}
+	workspace, err := r.resolveWorkspace(call.Workspace)
+	if err != nil {
+		return Result{}, err
+	}
 
 	timeout := r.policy.InactivityTimeout
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
 	}
 
-	cmd := exec.Command("bash", "-lc", call.Command)
-	cmd.Dir = call.Workspace
-	cmd.Env = sterilizeEnv(os.Environ())
-	cmd.Env = append(cmd.Env, "KITTY_SHELL=1", "TERM_PROGRAM=projectkitty")
-	// New process group so we can kill all descendants, not just the shell.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd, err := r.newShellCommand(workspace, call.Command)
+	if err != nil {
+		return Result{}, err
+	}
 
 	execID := newExecID()
 	started := time.Now().UTC()
@@ -128,6 +131,7 @@ func (r *Runtime) runShell(ctx context.Context, call Call) (Result, error) {
 		// PTY unavailable (sandboxed or restricted environment) — fall back to
 		// buffered exec. We lose interactive terminal emulation but keep the
 		// sterilized environment, process group, and streaming.
+		call.Workspace = workspace
 		return r.runShellBuffered(ctx, call, execID, timeout, started)
 	}
 	defer pt.Close()
@@ -202,11 +206,10 @@ func (r *Runtime) runShellBuffered(
 	timeout time.Duration,
 	started time.Time,
 ) (Result, error) {
-	cmd := exec.Command("bash", "-lc", call.Command)
-	cmd.Dir = call.Workspace
-	cmd.Env = sterilizeEnv(os.Environ())
-	cmd.Env = append(cmd.Env, "KITTY_SHELL=1", "TERM_PROGRAM=projectkitty")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd, err := r.newShellCommand(call.Workspace, call.Command)
+	if err != nil {
+		return Result{}, err
+	}
 
 	pr, pw, err := os.Pipe()
 	if err != nil {
@@ -352,9 +355,9 @@ func (r *Runtime) readSymbol(call Call) (Result, error) {
 // safePath resolves a workspace-relative or absolute path and rejects anything
 // outside the workspace root.
 func (r *Runtime) safePath(workspace, target string) (string, error) {
-	wsAbs, err := filepath.Abs(workspace)
+	wsAbs, err := r.resolveWorkspace(workspace)
 	if err != nil {
-		return "", fmt.Errorf("workspace path: %w", err)
+		return "", err
 	}
 
 	candidate := target
@@ -366,19 +369,45 @@ func (r *Runtime) safePath(workspace, target string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
-	if !strings.HasPrefix(abs, wsAbs+string(filepath.Separator)) && abs != wsAbs {
+
+	if info, err := os.Lstat(abs); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(abs)
+			if err != nil {
+				return "", fmt.Errorf("resolve symlink: %w", err)
+			}
+			abs = resolved
+		}
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("stat path: %w", err)
+	}
+
+	if !withinWorkspace(wsAbs, abs) {
 		return "", fmt.Errorf("path escapes workspace: %s", target)
 	}
+
+	parent, err := resolveExistingPath(filepath.Dir(abs))
+	if err != nil {
+		return "", fmt.Errorf("resolve parent dir: %w", err)
+	}
+	if !withinWorkspace(wsAbs, parent) {
+		return "", fmt.Errorf("path escapes workspace: %s", target)
+	}
+
 	return abs, nil
 }
 
 func (r *Runtime) listFiles(call Call) (Result, error) {
+	workspace, err := r.resolveWorkspace(call.Workspace)
+	if err != nil {
+		return Result{}, err
+	}
 	limit := call.Limit
 	if limit <= 0 {
 		limit = 20
 	}
 	files := make([]string, 0, limit)
-	err := filepath.WalkDir(call.Workspace, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -391,7 +420,7 @@ func (r *Runtime) listFiles(call Call) (Result, error) {
 			}
 			return nil
 		}
-		rel, relErr := filepath.Rel(call.Workspace, path)
+		rel, relErr := filepath.Rel(workspace, path)
 		if relErr == nil {
 			files = append(files, filepath.ToSlash(rel))
 		}
@@ -739,29 +768,100 @@ func newExecID() string {
 	return hex.EncodeToString(b)
 }
 
-func resolveWorkspacePath(workspace, target string) (string, error) {
+func (r *Runtime) newShellCommand(workspace, command string) (*exec.Cmd, error) {
+	cmdEnv := sterilizeEnv(os.Environ())
+	cmdEnv = append(cmdEnv, "KITTY_SHELL=1", "TERM_PROGRAM=projectkitty")
+
+	cmd, err := r.wrapSandboxedCommand(workspace, command)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = cmdEnv
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd, nil
+}
+
+func (r *Runtime) wrapSandboxedCommand(workspace, command string) (*exec.Cmd, error) {
+	switch r.policy.SandboxMode {
+	case "", "host":
+		cmd := exec.Command("bash", "-lc", command)
+		cmd.Dir = workspace
+		return cmd, nil
+	case "auto":
+		if _, err := exec.LookPath("bwrap"); err == nil {
+			return r.newBwrapCommand(workspace, command), nil
+		}
+		cmd := exec.Command("bash", "-lc", command)
+		cmd.Dir = workspace
+		return cmd, nil
+	case "bwrap":
+		if _, err := exec.LookPath("bwrap"); err != nil {
+			return nil, fmt.Errorf("sandbox unavailable: bwrap not found in PATH")
+		}
+		return r.newBwrapCommand(workspace, command), nil
+	default:
+		return nil, fmt.Errorf("unknown sandbox mode: %s", r.policy.SandboxMode)
+	}
+}
+
+func (r *Runtime) newBwrapCommand(workspace, command string) *exec.Cmd {
+	args := []string{
+		"--die-with-parent",
+		"--new-session",
+		"--unshare-pid",
+		"--unshare-net",
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--tmpfs", "/tmp",
+		"--bind", workspace, workspace,
+		"--chdir", workspace,
+	}
+
+	for _, dir := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/nix/store"} {
+		args = append(args, "--ro-bind-try", dir, dir)
+	}
+
+	args = append(args, "bash", "-lc", command)
+	return exec.Command("bwrap", args...)
+}
+
+func (r *Runtime) resolveWorkspace(workspace string) (string, error) {
 	workspaceAbs, err := filepath.Abs(workspace)
 	if err != nil {
 		return "", fmt.Errorf("resolve workspace: %w", err)
 	}
-
-	candidate := target
-	if !filepath.IsAbs(candidate) {
-		candidate = filepath.Join(workspaceAbs, candidate)
-	}
-
-	candidateAbs, err := filepath.Abs(candidate)
+	resolved, err := filepath.EvalSymlinks(workspaceAbs)
 	if err != nil {
-		return "", fmt.Errorf("resolve path %q: %w", target, err)
+		return "", fmt.Errorf("resolve workspace symlink: %w", err)
 	}
-
-	rel, err := filepath.Rel(workspaceAbs, candidateAbs)
+	info, err := os.Stat(resolved)
 	if err != nil {
-		return "", fmt.Errorf("check path %q: %w", target, err)
+		return "", fmt.Errorf("stat workspace: %w", err)
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path escapes workspace: %s", target)
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace is not a directory: %s", workspace)
 	}
+	return resolved, nil
+}
 
-	return candidateAbs, nil
+func withinWorkspace(workspace, target string) bool {
+	return target == workspace || strings.HasPrefix(target, workspace+string(filepath.Separator))
+}
+
+func resolveExistingPath(path string) (string, error) {
+	current := path
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			return resolved, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		next := filepath.Dir(current)
+		if next == current {
+			return "", err
+		}
+		current = next
+	}
 }

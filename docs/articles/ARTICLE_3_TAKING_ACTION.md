@@ -38,7 +38,16 @@ Same answer. Correct behavior. No frozen process.
 
 That gap — from buffered `os/exec` to PTY-backed execution — is what this article is about. We are building **Claws**, the execution layer for ProjectKitty. Its job is to run commands safely, observe output correctly, and not let one long-running job freeze everything else.
 
-The current prototype does not fully implement that runtime yet. This article mixes two things on purpose:
+When this article says *safe*, it means safe from the agent's perspective: commands are classified, bounded by policy, tied to a workspace, and observable while they run. On Linux, Claws can also run shell commands inside an optional `bubblewrap` sandbox. That is stronger than policy alone, but it is still a narrower implementation than the cross-platform containment used by the mature agents in this article.
+
+In the current CLI, sandbox selection is explicit: `--sandbox=host|auto|bwrap`, with `PROJECTKITTY_SANDBOX` as the environment fallback. `auto` is the pragmatic mode for local development: use `bubblewrap` when available, otherwise stay on the host and keep the runtime behavior observable.
+
+```bash
+projectkitty --sandbox=auto
+projectkitty --sandbox=bwrap --task "Run the test suite and report failures."
+```
+
+The current prototype implements part of that runtime already. This article still mixes two things on purpose:
 
 - what exists in the repo today
 - what the next runtime iteration should look like
@@ -120,7 +129,7 @@ After the user's command exits, this snippet writes every PID in the process gro
 | gVisor | `runsc` | Linux | User-space Go kernel — intercepts all syscalls |
 | LXC/LXD | `lxc` | Linux | Full-system container (experimental) |
 
-gVisor is the strongest isolation: the container runs inside a user-space Go kernel that intercepts every syscall before it reaches the real kernel. No other tool in this set offers an equivalent. Claude Code has macOS seatbelt only. Codex has Linux bubblewrap. Neither is cross-platform. Claws currently has none.
+gVisor is the strongest isolation: the container runs inside a user-space Go kernel that intercepts every syscall before it reaches the real kernel. No other tool in this set offers an equivalent. Claude Code has macOS seatbelt only. Codex has Linux bubblewrap. Neither is cross-platform. Claws now has an optional Linux `bubblewrap` path, but not a cross-platform sandbox layer.
 
 **`ToolConfirmation` hooks with typed serialized fields.** External processes can intercept every tool decision. An `exec` hook receives `{command, rootCommand}`; an `edit` hook receives `{fileName, filePath, fileDiff, originalContent, newContent, isModifying}`. This enables external governance scripts to implement arbitrary approval logic without modifying the agent.
 
@@ -128,9 +137,9 @@ gVisor is the strongest isolation: the container runs inside a user-space Go ker
 
 ## 2. The PTY Execution Path
 
-The next runtime iteration should add PTY support using `github.com/creack/pty`. That changes shell execution from "buffer everything, return at exit" to "stream everything, return at exit."
+The current runtime uses `github.com/creack/pty` for shell execution. That changes the path from "buffer everything, return at exit" to "stream everything, return at exit," with a buffered fallback if PTY startup is unavailable.
 
-Target shell runner:
+Current shell runner shape:
 
 ```go
 func (r *Runtime) runShell(ctx context.Context, call Call) (Result, error) {
@@ -237,7 +246,7 @@ Six things would change from the naive version:
 
 Before any command runs, it passes through `checkPolicy`. This is the boundary between the agent and the system. Getting it wrong in either direction is expensive: too loose and the agent deletes something; too tight and it can't do useful work.
 
-The current prototype has a smaller `Policy` struct. The next useful shape is:
+The current prototype has this `Policy` struct:
 
 ```go
 type Policy struct {
@@ -248,7 +257,9 @@ type Policy struct {
 }
 ```
 
-In the target design, `checkPolicy` should enforce three layers, informed by what we learned from the production tools:
+`checkPolicy` is the agent-layer permission gate. It decides whether Claws should call the OS at all. That is different from a sandbox: a sandbox is the OS or container refusing the call regardless of what the agent decided. Claws has the first everywhere. On Linux, it now also has an optional `bubblewrap` execution path for shell commands. The host-runtime fallback remains the default when no sandbox is configured.
+
+The current implementation enforces three layers, informed by what we learned from the production tools:
 
 **Layer 1: Command splitting.** Borrowed from Gemini's `splitCommands()`. Before any other check, `checkPolicy` breaks the command on `&&`, `||`, and `;` and evaluates each segment independently. `go test ./... && git push` is two operations with different risk profiles.
 
@@ -318,7 +329,7 @@ The UI reads from this channel and renders each event as it arrives. But the ori
 
 For a `go test ./...` run that takes thirty seconds, the user sees nothing until it's done.
 
-The next fix is to thread a streaming callback through the runtime so output lines become events as they arrive. The callback carries the `execID` so the observer can verify which run produced a given line:
+The runtime threads a streaming callback through shell execution so output lines become events as they arrive. The callback carries the `execID` so the observer can verify which run produced a given line:
 
 ```go
 type StreamFn func(execID string, line string)
@@ -479,7 +490,7 @@ Bubble Tea's `tea.Cmd` pattern is designed for this — multiple background goro
 
 ## 7. Target Runtime Flow
 
-The current prototype still uses buffered `exec.CommandContext`. The flow below is the target runtime shape once PTY execution, streaming, and richer policy checks are implemented. The planner decides to run `go test ./...`:
+The current prototype already follows this general runtime shape: PTY execution when available, streamed output, and policy checks before execution. The flow below is the current design, simplified into one trace. The planner decides to run `go test ./...`:
 
 ```
 Step 4 — ActionRunCommand
@@ -515,11 +526,11 @@ Step 4 — ActionRunCommand
 
 ### Where It Still Gets It Wrong
 
-**No sandbox.** This is the largest gap. Claude has `sandbox-exec` on macOS. Codex has bubblewrap on Linux. Gemini has five sandbox options — including gVisor, which runs the container inside a user-space Go kernel that intercepts every syscall before it reaches the real kernel. Claws runs on the host. The policy gate is defense-in-depth, not isolation. Until we add bubblewrap support, a sufficiently crafted repository file could trick the agent into running something outside the workspace. The blocklist is not a sandbox.
+**No default or cross-platform sandbox.** This is still the largest gap. Claude has `sandbox-exec` on macOS. Codex has bubblewrap on Linux. Gemini has five sandbox options — including gVisor, which runs the container inside a user-space Go kernel that intercepts every syscall before it reaches the real kernel. Claws now has an optional Linux `bubblewrap` mode, but host execution is still the default and there is no equivalent cross-platform containment layer yet.
 
 **No policy persistence.** "Always allow `go test`" resets on restart. Gemini writes rules to `~/.gemini/policies/` in JSON or TOML, with `argsPattern` regex matching so "always allow `git commit`" doesn't also allow `git push`. Codex stores `approval_mode` per thread in SQLite with self-healing upsert logic. Claws rebuilds from config on each run. This is the next step in this layer's evolution.
 
-**Fragment matching is naive.** `python script.py` passes the blocklist even if `script.py` deletes files. Defaulting to `manual` mode contains this: nothing runs without explicit allowlist entry. But it is not the same as Codex's bubblewrap or Gemini's gVisor, which enforce restrictions at the OS level regardless of what the agent decides.
+**Fragment matching is naive.** `python script.py` passes the blocklist even if `script.py` deletes files. Defaulting to `manual` mode contains this: nothing runs without explicit allowlist entry. Optional `bubblewrap` helps on Linux, but it is still not the same as a portable, always-on containment layer.
 
 **No `write_stdin`.** Codex can respond to interactive prompts mid-execution by writing to the running process's stdin. Claws can't. A command waiting for a yes/no response will hit the inactivity timeout and be killed rather than answered. The PTY gives us the infrastructure for this — the master fd is writable — but the planner has no mechanism yet to decide what to write.
 
@@ -531,7 +542,7 @@ Step 4 — ActionRunCommand
 
 ProjectKitty can now read a codebase, run commands against it safely, and write or edit files in place. File writing and editing are live: atomic writes via temp-file rename, 3-tier edit matching for model-generated patches, and SHA256 conflict detection to catch concurrent modifications. A session is becoming real — a planner that finds a bug, edits the source, and validates the fix without human intervention.
 
-The remaining gaps are policy persistence and sandbox isolation. "Always allow `go test`" resets on restart today. A bubblewrap or gVisor sandbox would let the agent operate with OS-level containment rather than a blocklist.
+The remaining gaps are policy persistence and stronger sandbox coverage. "Always allow `go test`" resets on restart today. Linux `bubblewrap` improves containment, but it is optional and not portable; a broader sandbox story would let the agent operate with OS-level containment rather than mostly a blocklist.
 
 Article 4 will build the memory layer: session logs in JSONL, durable project facts in a structured store, and the compaction step that converts a long session into a short summary the next run can start from. Policy persistence lands there too — the `approval_mode` and allowlist entries that today live only in config.
 
