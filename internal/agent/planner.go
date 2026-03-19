@@ -66,12 +66,25 @@ func (p *DefaultPlanner) Next(_ context.Context, state State) Decision {
 		}
 	}
 
+	// If a file was written or edited (by a model-driven planner), proceed
+	// straight to validation. DefaultPlanner does not initiate writes — it
+	// cannot know what to write without model guidance — but it correctly
+	// handles the post-write validation and memory-save phases.
+	wroteOrEdited := (state.WriteFileTool != nil && state.WriteFileTool.Result != nil) ||
+		(state.EditFileTool != nil && state.EditFileTool.Result != nil)
+
 	if state.ValidationTool == nil || state.ValidationTool.Result == nil {
+		title := "Run safe validation"
+		thoughts := "Validation confirms our understanding of the changes. Choosing the most targeted command available."
+		if wroteOrEdited {
+			title = "Validate file change"
+			thoughts = "A file was written or edited. Validate immediately to confirm it compiles and tests pass."
+		}
 		return Decision{
 			Kind:     ActionRunCommand,
-			Title:    "Run safe validation",
+			Title:    title,
 			Detail:   "Execute the safest command that can validate the current repository state.",
-			Thoughts: "Validation confirms our understanding of the changes. Choosing the most targeted command available.",
+			Thoughts: thoughts,
 			Command:  chooseValidationCommand(state),
 		}
 	}

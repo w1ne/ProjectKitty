@@ -20,9 +20,15 @@ Rules:
   Example: task "how does the agent stay within budget" → query "token overflow limit context session turns"
 - After search, call outline_context to see what symbols exist in the candidate files.
 - If the outline shows a relevant symbol, call inspect_symbol with its exact path and name.
-- After reading a symbol, call outline_related to trace cross-file connections, then run_command to validate.
+- After reading a symbol, call outline_related to trace cross-file connections.
+- If the task requires creating or modifying files:
+  - Use write_file to create a new file or completely overwrite an existing one.
+  - Use edit_file to change a specific part of an existing file. Provide the shortest old_string
+    that uniquely identifies the target location. Prefer edit_file over write_file for partial changes.
+  - After any write_file or edit_file, always call run_command to validate the change compiles and tests pass.
+- If the task is read-only (explain, find, summarise), skip write_file and edit_file entirely.
 - If no relevant symbol is found after outlining, try search_repository again with different terms.
-- Call save_memory then finish when the task is complete.
+- Call save_memory then finish when the task is complete. Pass a brief answer to finish.
 - Prefer specific function names and identifiers in search queries over generic words.`
 
 // ModelPlanner is a model-driven planner that calls Gemini to decide the next action.
