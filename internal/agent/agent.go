@@ -28,8 +28,8 @@ func New(planner Planner, intel intelligence.Service, rt *runtime.Runtime, memor
 }
 
 const (
-	maxSessionTurns          = 20
-	contextOverflowTokens    = 40_000
+	maxSessionTurns       = 20
+	contextOverflowTokens = 40_000
 )
 
 func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
@@ -38,33 +38,64 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 	go func() {
 		defer close(events)
 
+		// send delivers an event to the channel, aborting the session if the
+		// caller has cancelled the context (prevents goroutine leak when the
+		// UI stops reading).
+		send := func(e Event) bool {
+			select {
+			case events <- e:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
+		// record persists a session event but only warns on failure — a
+		// filesystem hiccup should never abort the agent loop.
+		record := func(step int, kind, detail string) {
+			if err := a.memory.RecordSessionEvent("", kind, detail); err != nil {
+				send(newEvent(EventWarning, step, "Memory recording skipped", err.Error()))
+			}
+		}
+
 		sessionID, err := a.memory.StartSession(input.Task, input.Workspace)
 		if err != nil {
-			events <- newErrorEvent(0, "Start session", err)
+			send(newErrorEvent(0, "Start session", err))
 			return
+		}
+		// Rebind record with the real sessionID now that we have it.
+		record = func(step int, kind, detail string) {
+			if err := a.memory.RecordSessionEvent(sessionID, kind, detail); err != nil {
+				send(newEvent(EventWarning, step, "Memory recording skipped", err.Error()))
+			}
 		}
 
 		state := State{Input: input}
-		events <- newEvent(EventStarted, 0, "Session started", fmt.Sprintf("Task: %s", input.Task))
+		if !send(newEvent(EventStarted, 0, "Session started", fmt.Sprintf("Task: %s", input.Task))) {
+			return
+		}
 
 		for {
 			if state.Steps >= maxSessionTurns {
-				events <- newEvent(EventLoopDetected, state.Steps, "Loop detected", fmt.Sprintf("Session exceeded %d steps — stopping to prevent runaway execution.", maxSessionTurns))
+				send(newEvent(EventLoopDetected, state.Steps, "Loop detected",
+					fmt.Sprintf("Session exceeded %d steps — stopping to prevent runaway execution.", maxSessionTurns)))
 				_ = a.memory.EndSession(sessionID)
 				return
 			}
-			decision := a.planner.Next(state)
+
+			decision := a.planner.Next(ctx, state)
 			step := state.Steps + 1
-			events <- newEvent(EventPlanning, step, decision.Title, decision.Detail)
-
-			if decision.Thoughts != "" {
-				events <- newEvent(EventThought, step, "Thinking", decision.Thoughts)
-			}
-
-			if err := a.memory.RecordSessionEvent(sessionID, "plan", decision.Title+": "+decision.Detail); err != nil {
-				events <- newErrorEvent(step, "Record plan", err)
+			if !send(newEvent(EventPlanning, step, decision.Title, decision.Detail)) {
 				return
 			}
+
+			if decision.Thoughts != "" {
+				if !send(newEvent(EventThought, step, "Thinking", decision.Thoughts)) {
+					return
+				}
+			}
+
+			record(step, "plan", decision.Title+": "+decision.Detail)
 
 			switch decision.Kind {
 			case ActionSearchRepository:
@@ -78,44 +109,49 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 				}
 				search, err := a.intelligence.Search(ctx, req)
 				if err != nil {
-					events <- newErrorEvent(step, "Search repository", err)
+					if !send(newErrorEvent(step, "Search repository", err)) {
+						return
+					}
 					return
 				}
 				state.SearchTool = &SearchToolState{
 					Request: req,
 					Result:  &search,
 				}
-				events <- newEvent(EventSearchObserved, step, "Search results", search.Summary)
-				if err := a.memory.RecordSessionEvent(sessionID, "search", search.Summary); err != nil {
-					events <- newErrorEvent(step, "Record search", err)
+				if !send(newEvent(EventSearchObserved, step, "Search results", search.Summary)) {
 					return
 				}
+				record(step, "search", search.Summary)
 
 			case ActionBroadenSearch:
-			broad := longestWord(input.Task)
-			if broad == "" {
-				state.BroadenedSearch = true
-				break
-			}
-			broadReq := intelligence.Request{
-				Task:      broad,
-				Workspace: input.Workspace,
-			}
-			broadSearch, err := a.intelligence.Search(ctx, broadReq)
-			if err == nil && len(broadSearch.CandidateFiles) > 0 {
-				merged := mergeUnique(state.SearchTool.Result.CandidateFiles, broadSearch.CandidateFiles)
-				state.SearchTool.Result.CandidateFiles = merged
-				broadSearch.Summary = fmt.Sprintf("Broadened search results (token %q): %s", broad, strings.Join(merged, ", "))
-				events <- newEvent(EventSearchObserved, step, "Broadened search results", broadSearch.Summary)
-				if err := a.memory.RecordSessionEvent(sessionID, "search_broad", broadSearch.Summary); err != nil {
-					events <- newErrorEvent(step, "Record broadened search", err)
-					return
+				broad := longestWord(input.Task)
+				if broad == "" {
+					state.BroadenedSearch = true
+					break
 				}
-			}
-			state.BroadenedSearch = true
-			state.OutlineTool = nil // reset so planner re-outlines with merged candidates
+				broadReq := intelligence.Request{
+					Task:      broad,
+					Workspace: input.Workspace,
+				}
+				broadSearch, err := a.intelligence.Search(ctx, broadReq)
+				if err != nil {
+					// Non-fatal: warn and mark broadened so we don't loop.
+					if !send(newEvent(EventWarning, step, "Broadened search failed", err.Error())) {
+						return
+					}
+				} else if len(broadSearch.CandidateFiles) > 0 && state.SearchTool != nil && state.SearchTool.Result != nil {
+					merged := mergeUnique(state.SearchTool.Result.CandidateFiles, broadSearch.CandidateFiles)
+					state.SearchTool.Result.CandidateFiles = merged
+					broadSearch.Summary = fmt.Sprintf("Broadened search results (token %q): %s", broad, strings.Join(merged, ", "))
+					if !send(newEvent(EventSearchObserved, step, "Broadened search results", broadSearch.Summary)) {
+						return
+					}
+					record(step, "search_broad", broadSearch.Summary)
+				}
+				state.BroadenedSearch = true
+				state.OutlineTool = nil // reset so planner re-outlines with merged candidates
 
-		case ActionOutlineContext:
+			case ActionOutlineContext:
 				req := intelligence.OutlineRequest{
 					Task:      input.Task,
 					Workspace: input.Workspace,
@@ -123,22 +159,25 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 				}
 				outline, err := a.intelligence.Outline(ctx, req)
 				if err != nil {
-					events <- newErrorEvent(step, "Outline context", err)
+					if !send(newErrorEvent(step, "Outline context", err)) {
+						return
+					}
 					return
 				}
 				state.OutlineTool = &OutlineToolState{
 					Request: req,
 					Result:  &outline,
 				}
-				events <- newEvent(EventOutlineObserved, step, "Outline results", outline.Summary)
-				if outline.EstimatedTokens > contextOverflowTokens {
-					events <- newEvent(EventContextWindowWillOverflow, step, "Context window warning",
-						fmt.Sprintf("Estimated context ~%d tokens exceeds threshold — candidate set will be trimmed on next pass.", outline.EstimatedTokens))
-				}
-				if err := a.memory.RecordSessionEvent(sessionID, "outline", outline.Summary); err != nil {
-					events <- newErrorEvent(step, "Record outline", err)
+				if !send(newEvent(EventOutlineObserved, step, "Outline results", outline.Summary)) {
 					return
 				}
+				if outline.EstimatedTokens > contextOverflowTokens {
+					if !send(newEvent(EventContextWindowWillOverflow, step, "Context window warning",
+						fmt.Sprintf("Estimated context ~%d tokens exceeds threshold — candidate set will be trimmed on next pass.", outline.EstimatedTokens))) {
+						return
+					}
+				}
+				record(step, "outline", outline.Summary)
 
 			case ActionInspectSymbol:
 				call := runtime.Call{
@@ -147,74 +186,91 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 					Path:      decision.Path,
 					Symbol:    decision.Symbol,
 				}
-				events <- newEvent(EventAction, step, "Runtime action", fmt.Sprintf("Read symbol %s from %s", decision.Symbol, decision.Path))
+				if !send(newEvent(EventAction, step, "Runtime action", fmt.Sprintf("Read symbol %s from %s", decision.Symbol, decision.Path))) {
+					return
+				}
 				result, err := a.runtime.Execute(ctx, call)
 				if err != nil {
-					events <- newErrorEvent(step, "Read symbol", err)
+					if !send(newErrorEvent(step, "Read symbol", err)) {
+						return
+					}
 					return
 				}
 				state.ReadSymbolTool = &ReadSymbolToolState{
 					Call:   call,
 					Result: &result,
 				}
-				events <- newEvent(EventSymbolObserved, step, "Focused symbol", result.Summary)
-				if err := a.memory.RecordSessionEvent(sessionID, "read_symbol", result.Summary); err != nil {
-					events <- newErrorEvent(step, "Record symbol read", err)
+				if !send(newEvent(EventSymbolObserved, step, "Focused symbol", result.Summary)) {
 					return
 				}
+				record(step, "read_symbol", result.Summary)
 
 			case ActionOutlineRelated:
-			var relatedFiles []string
-			if state.OutlineTool != nil && state.OutlineTool.Result != nil {
-				relatedFiles = state.OutlineTool.Result.RelatedFiles
-			}
-			req := intelligence.OutlineRequest{
-				Task:      input.Task,
-				Workspace: input.Workspace,
-				Files:     relatedFiles,
-			}
-			outline, err := a.intelligence.Outline(ctx, req)
-			if err != nil {
-				events <- newErrorEvent(step, "Outline related files", err)
-				return
-			}
-			state.RelatedOutlineTool = &OutlineToolState{
-				Request: req,
-				Result:  &outline,
-			}
-			events <- newEvent(EventOutlineObserved, step, "Related file outline", outline.Summary)
-			if err := a.memory.RecordSessionEvent(sessionID, "outline_related", outline.Summary); err != nil {
-				events <- newErrorEvent(step, "Record related outline", err)
-				return
-			}
+				var relatedFiles []string
+				if state.OutlineTool != nil && state.OutlineTool.Result != nil {
+					relatedFiles = state.OutlineTool.Result.RelatedFiles
+				}
+				req := intelligence.OutlineRequest{
+					Task:      input.Task,
+					Workspace: input.Workspace,
+					Files:     relatedFiles,
+				}
+				outline, err := a.intelligence.Outline(ctx, req)
+				if err != nil {
+					if !send(newErrorEvent(step, "Outline related files", err)) {
+						return
+					}
+					return
+				}
+				state.RelatedOutlineTool = &OutlineToolState{
+					Request: req,
+					Result:  &outline,
+				}
+				if !send(newEvent(EventOutlineObserved, step, "Related file outline", outline.Summary)) {
+					return
+				}
+				record(step, "outline_related", outline.Summary)
 
-		case ActionRunCommand:
+			case ActionRunCommand:
 				cmd := decision.Command
 				if cmd == "" {
 					cmd = chooseValidationCommand(state)
 				}
-				events <- newEvent(EventAction, step, "Runtime action", cmd)
+				if !send(newEvent(EventAction, step, "Runtime action", cmd)) {
+					return
+				}
 				call := runtime.Call{
 					Tool:      runtime.ToolShell,
 					Workspace: input.Workspace,
 					Command:   cmd,
 					Stream: func(execID, line string) {
-						events <- newEvent(EventObserved, step, execID, line)
+						// Best-effort stream: don't abort if ctx is done.
+						select {
+						case events <- newEvent(EventObserved, step, execID, line):
+						case <-ctx.Done():
+						}
 					},
 				}
 				result, err := a.runtime.Execute(ctx, call)
 				if err != nil {
-					events <- newErrorEvent(step, "Execute command", err)
-					return
-				}
-				state.ValidationTool = &ValidationToolState{
-					Call:   call,
-					Result: &result,
-				}
-				events <- newEvent(EventObserved, step, "Runtime result", result.Summary)
-				if err := a.memory.RecordSessionEvent(sessionID, "runtime", result.Summary); err != nil {
-					events <- newErrorEvent(step, "Record runtime", err)
-					return
+					// Policy blocks and execution errors are non-fatal:
+					// emit a warning and let the planner decide next action.
+					if !send(newEvent(EventWarning, step, "Command failed", err.Error())) {
+						return
+					}
+					state.ValidationTool = &ValidationToolState{
+						Call:   call,
+						Result: &runtime.Result{Summary: err.Error()},
+					}
+				} else {
+					state.ValidationTool = &ValidationToolState{
+						Call:   call,
+						Result: &result,
+					}
+					if !send(newEvent(EventObserved, step, "Runtime result", result.Summary)) {
+						return
+					}
+					record(step, "runtime", result.Summary)
 				}
 
 			case ActionSaveMemory:
@@ -223,18 +279,18 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 					Category: "article1-foundation",
 					Summary:  factSummary,
 				}); err != nil {
-					events <- newErrorEvent(step, "Save fact", err)
-					return
+					if !send(newEvent(EventWarning, step, "Save fact failed", err.Error())) {
+						return
+					}
 				}
-				if err := a.memory.RecordSessionEvent(sessionID, "memory", factSummary); err != nil {
-					events <- newErrorEvent(step, "Record memory", err)
-					return
-				}
+				record(step, "memory", factSummary)
 				state.MemorySaved = true
-				events <- newEvent(EventMemory, step, "Memory updated", factSummary)
+				if !send(newEvent(EventMemory, step, "Memory updated", factSummary)) {
+					return
+				}
 
 			case ActionFinish:
-				events <- newEvent(EventFinished, step, "Loop finished", decision.Detail)
+				send(newEvent(EventFinished, step, "Loop finished", decision.Detail))
 				_ = a.memory.EndSession(sessionID)
 				return
 			}
@@ -247,7 +303,7 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 }
 
 func summarizeFact(state State) string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 5)
 	if state.SearchTool != nil && state.SearchTool.Result != nil {
 		parts = append(parts, "Candidates: "+strings.Join(state.SearchTool.Result.CandidateFiles, ", "))
 	}
@@ -282,6 +338,16 @@ func newEvent(kind EventKind, step int, title, detail string) Event {
 	}
 }
 
+func newErrorEvent(step int, title string, err error) Event {
+	return Event{
+		Kind:      EventErrored,
+		Step:      step,
+		Title:     title,
+		ErrText:   err.Error(),
+		Timestamp: time.Now().UTC(),
+	}
+}
+
 // longestWord returns the longest whitespace-separated word in s.
 func longestWord(s string) string {
 	best := ""
@@ -307,14 +373,4 @@ func mergeUnique(a, b []string) []string {
 		}
 	}
 	return out
-}
-
-func newErrorEvent(step int, title string, err error) Event {
-	return Event{
-		Kind:      EventErrored,
-		Step:      step,
-		Title:     title,
-		ErrText:   err.Error(),
-		Timestamp: time.Now().UTC(),
-	}
 }

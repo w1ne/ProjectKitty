@@ -195,7 +195,7 @@ type stubPlanner struct {
 	command string
 }
 
-func (p *stubPlanner) Next(_ State) Decision {
+func (p *stubPlanner) Next(_ context.Context, _ State) Decision {
 	return Decision{
 		Kind:    p.action,
 		Title:   "stub",

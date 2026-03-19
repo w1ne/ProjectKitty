@@ -1,12 +1,13 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
 
 type Planner interface {
-	Next(State) Decision
+	Next(ctx context.Context, state State) Decision
 }
 
 type DefaultPlanner struct{}
@@ -15,7 +16,7 @@ func NewPlanner() *DefaultPlanner {
 	return &DefaultPlanner{}
 }
 
-func (p *DefaultPlanner) Next(state State) Decision {
+func (p *DefaultPlanner) Next(_ context.Context, state State) Decision {
 	if state.SearchTool == nil || state.SearchTool.Result == nil {
 		return Decision{
 			Kind:     ActionSearchRepository,

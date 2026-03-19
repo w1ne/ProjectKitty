@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -262,7 +263,7 @@ func TestModelPlannerMockServer(t *testing.T) {
 		},
 	}
 
-	decision := planner.Next(state)
+	decision := planner.Next(context.Background(), state)
 	if decision.Kind != ActionOutlineContext {
 		t.Errorf("expected outline_context from mock server, got %q", decision.Kind)
 	}
@@ -273,7 +274,7 @@ func TestModelPlannerFallbackOnAPIError(t *testing.T) {
 	planner := NewModelPlanner("test-key")
 	planner.endpoint = "http://127.0.0.1:1" // port 1 is never open; connection refused instantly
 
-	decision := planner.Next(State{Input: RunInput{Task: "find the loop guard"}})
+	decision := planner.Next(context.Background(), State{Input: RunInput{Task: "find the loop guard"}})
 
 	// Connection refused → fallback to DefaultPlanner → ActionSearchRepository
 	if decision.Kind != ActionSearchRepository {

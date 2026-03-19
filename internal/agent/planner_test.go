@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"testing"
 
 	"github.com/w1ne/projectkitty/internal/intelligence"
@@ -10,12 +11,12 @@ import (
 func TestPlannerFlow(t *testing.T) {
 	planner := NewPlanner()
 
-	first := planner.Next(State{})
+	first := planner.Next(context.Background(), State{})
 	if first.Kind != ActionSearchRepository {
 		t.Fatalf("expected first action %q, got %q", ActionSearchRepository, first.Kind)
 	}
 
-	second := planner.Next(State{
+	second := planner.Next(context.Background(), State{
 		SearchTool: &SearchToolState{
 			Result: &intelligence.SearchResult{
 				CandidateFiles: []string{"go.mod"},
@@ -27,7 +28,7 @@ func TestPlannerFlow(t *testing.T) {
 		t.Fatalf("unexpected second decision: %#v", second)
 	}
 
-	third := planner.Next(State{
+	third := planner.Next(context.Background(), State{
 		SearchTool: &SearchToolState{
 			Result: &intelligence.SearchResult{
 				CandidateFiles: []string{"go.mod"},
@@ -44,7 +45,7 @@ func TestPlannerFlow(t *testing.T) {
 		t.Fatalf("unexpected inspect decision: %#v", third)
 	}
 
-	fourth := planner.Next(State{
+	fourth := planner.Next(context.Background(), State{
 		SearchTool: &SearchToolState{
 			Result: &intelligence.SearchResult{
 				CandidateFiles: []string{"go.mod"},
@@ -62,7 +63,7 @@ func TestPlannerFlow(t *testing.T) {
 		t.Fatalf("expected validation command, got %#v", fourth)
 	}
 
-	fifth := planner.Next(State{
+	fifth := planner.Next(context.Background(), State{
 		SearchTool: &SearchToolState{
 			Result: &intelligence.SearchResult{
 				CandidateFiles: []string{"go.mod"},
@@ -81,7 +82,7 @@ func TestPlannerFlow(t *testing.T) {
 		t.Fatalf("expected save memory, got %q", fifth.Kind)
 	}
 
-	sixth := planner.Next(State{
+	sixth := planner.Next(context.Background(), State{
 		SearchTool: &SearchToolState{
 			Result: &intelligence.SearchResult{
 				CandidateFiles: []string{"go.mod"},
@@ -106,7 +107,7 @@ func TestPlannerBroadensWhenNoFocusedSymbol(t *testing.T) {
 	planner := NewPlanner()
 
 	// No focused symbol and not yet broadened → should request broaden
-	decision := planner.Next(State{
+	decision := planner.Next(context.Background(), State{
 		SearchTool: &SearchToolState{Result: &intelligence.SearchResult{
 			CandidateFiles: []string{"internal/app/main.go"},
 		}},
@@ -122,7 +123,7 @@ func TestPlannerSkipsInspectWithoutStrongSymbolAfterBroadening(t *testing.T) {
 	planner := NewPlanner()
 
 	// After broadening with still no focused symbol → skip to validation
-	decision := planner.Next(State{
+	decision := planner.Next(context.Background(), State{
 		SearchTool: &SearchToolState{Result: &intelligence.SearchResult{
 			CandidateFiles: []string{"internal/app/main.go"},
 		}},
@@ -138,7 +139,7 @@ func TestPlannerSkipsBroadenWhenAlreadyBroadened(t *testing.T) {
 	planner := NewPlanner()
 
 	// BroadenedSearch already true — should not loop back to broaden
-	decision := planner.Next(State{
+	decision := planner.Next(context.Background(), State{
 		SearchTool: &SearchToolState{Result: &intelligence.SearchResult{
 			CandidateFiles: []string{"a.go"},
 			HasGoModule:    true,
@@ -155,7 +156,7 @@ func TestPlannerOutlineRelated(t *testing.T) {
 	planner := NewPlanner()
 
 	// After reading the focused symbol and having related files, planner should outline them
-	decision := planner.Next(State{
+	decision := planner.Next(context.Background(), State{
 		SearchTool: &SearchToolState{
 			Result: &intelligence.SearchResult{
 				CandidateFiles: []string{"internal/agent/planner.go"},
@@ -182,7 +183,7 @@ func TestPlannerSkipsOutlineRelatedWhenNoRelatedFiles(t *testing.T) {
 	planner := NewPlanner()
 
 	// No related files — planner should jump straight to validation
-	decision := planner.Next(State{
+	decision := planner.Next(context.Background(), State{
 		SearchTool: &SearchToolState{
 			Result: &intelligence.SearchResult{
 				CandidateFiles: []string{"internal/agent/planner.go"},
@@ -245,7 +246,7 @@ func TestPlannerFullFlowWithRelatedFiles(t *testing.T) {
 	}
 
 	for i, step := range steps {
-		got := planner.Next(step.state)
+		got := planner.Next(context.Background(), step.state)
 		if got.Kind != step.wantKind {
 			t.Fatalf("step %d: expected %q, got %q (decision: %#v)", i, step.wantKind, got.Kind, got)
 		}

@@ -34,6 +34,14 @@ const (
 // execID ties each line to the specific execution that produced it.
 type StreamFn func(execID string, line string)
 
+// maxOutputBytes caps the buffered output returned to the agent.
+// Output beyond this limit is truncated with a marker so the model knows.
+const maxOutputBytes = 100 * 1024 // 100 KB
+
+// scannerMaxToken is the maximum single-line size the scanner will accept.
+// Default bufio.Scanner is 64 KB which is too small for minified JS and build logs.
+const scannerMaxToken = 256 * 1024 // 256 KB
+
 type Policy struct {
 	ApprovalMode      string
 	AllowedCommands   []string
@@ -57,6 +65,7 @@ type Result struct {
 	Summary   string
 	Output    string
 	ExitCode  int
+	Truncated bool
 	StartedAt time.Time
 	EndedAt   time.Time
 }
@@ -108,7 +117,7 @@ func (r *Runtime) runShell(ctx context.Context, call Call) (Result, error) {
 		// PTY unavailable (sandboxed or restricted environment) — fall back to
 		// buffered exec. We lose interactive terminal emulation but keep the
 		// sterilized environment, process group, and streaming.
-		return r.runShellBuffered(ctx, call, cmd, execID, timeout, started)
+		return r.runShellBuffered(ctx, call, execID, timeout, started)
 	}
 	defer pt.Close()
 
@@ -119,9 +128,12 @@ func (r *Runtime) runShell(ctx context.Context, call Call) (Result, error) {
 
 	go func() {
 		scanner := bufio.NewScanner(pt)
+		scanner.Buffer(make([]byte, scannerMaxToken), scannerMaxToken)
 		for scanner.Scan() {
 			line := scanner.Text()
-			buf.WriteString(line + "\n")
+			if buf.Len() < maxOutputBytes {
+				buf.WriteString(line + "\n")
+			}
 			if call.Stream != nil {
 				call.Stream(execID, line)
 			}
@@ -149,7 +161,10 @@ loop:
 		case <-done:
 			break loop
 		case <-outputArrived:
-			inactivity.Reset(timeout)
+			// Stop before Reset to avoid the race where the timer fires
+			// while we're trying to reset it (Go timer docs recommend this).
+			inactivity.Stop()
+			inactivity = time.NewTimer(timeout)
 		}
 	}
 
@@ -161,24 +176,7 @@ loop:
 		}
 	}
 
-	output := stripANSI(strings.TrimSpace(buf.String()))
-	ended := time.Now().UTC()
-
-	summary := fmt.Sprintf("Command `%s` finished with exit code %d.", call.Command, exitCode)
-	if output != "" {
-		firstLine := strings.Split(output, "\n")[0]
-		summary += " " + firstLine
-	}
-
-	return Result{
-		Tool:      ToolShell,
-		ExecID:    execID,
-		Summary:   summary,
-		Output:    output,
-		ExitCode:  exitCode,
-		StartedAt: started,
-		EndedAt:   ended,
-	}, nil
+	return r.buildResult(call.Command, execID, buf.String(), exitCode, started)
 }
 
 // runShellBuffered is used when pty.Start fails (sandboxed environments).
@@ -189,7 +187,6 @@ loop:
 func (r *Runtime) runShellBuffered(
 	ctx context.Context,
 	call Call,
-	_ *exec.Cmd, // discarded — see above
 	execID string,
 	timeout time.Duration,
 	started time.Time,
@@ -204,12 +201,12 @@ func (r *Runtime) runShellBuffered(
 	if err != nil {
 		return Result{}, fmt.Errorf("pipe: %w", err)
 	}
+	defer pr.Close()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 
 	if err := cmd.Start(); err != nil {
 		pw.Close()
-		pr.Close()
 		return Result{}, fmt.Errorf("start: %w", err)
 	}
 	pw.Close() // parent doesn't write
@@ -220,9 +217,12 @@ func (r *Runtime) runShellBuffered(
 
 	go func() {
 		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, scannerMaxToken), scannerMaxToken)
 		for scanner.Scan() {
 			line := scanner.Text()
-			buf.WriteString(line + "\n")
+			if buf.Len() < maxOutputBytes {
+				buf.WriteString(line + "\n")
+			}
 			if call.Stream != nil {
 				call.Stream(execID, line)
 			}
@@ -249,10 +249,10 @@ loop:
 		case <-done:
 			break loop
 		case <-outputArrived:
-			inactivity.Reset(timeout)
+			inactivity.Stop()
+			inactivity = time.NewTimer(timeout)
 		}
 	}
-	pr.Close()
 
 	exitCode := 0
 	if err := cmd.Wait(); err != nil {
@@ -262,13 +262,32 @@ loop:
 		}
 	}
 
-	output := strings.TrimSpace(buf.String())
-	ended := time.Now().UTC()
+	return r.buildResult(call.Command, execID, buf.String(), exitCode, started)
+}
 
-	summary := fmt.Sprintf("Command `%s` finished with exit code %d.", call.Command, exitCode)
+// buildResult constructs a Result from raw buffered output, applying ANSI
+// stripping, output truncation, and summary generation consistently for both
+// PTY and buffered execution paths.
+func (r *Runtime) buildResult(command, execID, raw string, exitCode int, started time.Time) (Result, error) {
+	output := stripANSI(strings.TrimSpace(raw))
+	truncated := false
+	if len(output) > maxOutputBytes {
+		output = output[:maxOutputBytes] + "\n[output truncated]"
+		truncated = true
+	}
+
+	summary := fmt.Sprintf("Command `%s` finished with exit code %d.", command, exitCode)
 	if output != "" {
-		firstLine := strings.Split(output, "\n")[0]
-		summary += " " + firstLine
+		// Include first non-empty line in summary for quick scan.
+		for _, line := range strings.Split(output, "\n") {
+			if strings.TrimSpace(line) != "" {
+				summary += " " + line
+				break
+			}
+		}
+	}
+	if truncated {
+		summary += " [output truncated]"
 	}
 
 	return Result{
@@ -277,13 +296,18 @@ loop:
 		Summary:   summary,
 		Output:    output,
 		ExitCode:  exitCode,
+		Truncated: truncated,
 		StartedAt: started,
-		EndedAt:   ended,
+		EndedAt:   time.Now().UTC(),
 	}, nil
 }
 
 func (r *Runtime) readFile(call Call) (Result, error) {
-	content, err := os.ReadFile(filepath.Join(call.Workspace, call.Path))
+	path, err := r.safePath(call.Workspace, call.Path)
+	if err != nil {
+		return Result{}, err
+	}
+	content, err := os.ReadFile(path)
 	if err != nil {
 		return Result{}, err
 	}
@@ -295,7 +319,11 @@ func (r *Runtime) readFile(call Call) (Result, error) {
 }
 
 func (r *Runtime) readSymbol(call Call) (Result, error) {
-	content, err := os.ReadFile(filepath.Join(call.Workspace, call.Path))
+	path, err := r.safePath(call.Workspace, call.Path)
+	if err != nil {
+		return Result{}, err
+	}
+	content, err := os.ReadFile(path)
 	if err != nil {
 		return Result{}, err
 	}
@@ -308,6 +336,23 @@ func (r *Runtime) readSymbol(call Call) (Result, error) {
 		Summary: fmt.Sprintf("Read symbol %s from %s.", call.Symbol, call.Path),
 		Output:  symbol.Snippet,
 	}, nil
+}
+
+// safePath resolves a workspace-relative path and rejects path traversal.
+func (r *Runtime) safePath(workspace, rel string) (string, error) {
+	wsAbs, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", fmt.Errorf("workspace path: %w", err)
+	}
+	joined := filepath.Join(wsAbs, rel)
+	abs, err := filepath.Abs(joined)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	if !strings.HasPrefix(abs, wsAbs+string(filepath.Separator)) && abs != wsAbs {
+		return "", fmt.Errorf("path traversal rejected: %s is outside workspace", rel)
+	}
+	return abs, nil
 }
 
 func (r *Runtime) listFiles(call Call) (Result, error) {
@@ -351,6 +396,11 @@ func (r *Runtime) checkPolicy(command string) error {
 	if normalized == "" {
 		return errors.New("empty command")
 	}
+	// Injection check runs on the full command before splitting — catches
+	// patterns the model may have absorbed from repository content.
+	if err := checkInjection(normalized); err != nil {
+		return err
+	}
 	for _, segment := range splitCommands(normalized) {
 		if err := r.checkSegment(segment); err != nil {
 			return err
@@ -359,20 +409,29 @@ func (r *Runtime) checkPolicy(command string) error {
 	return nil
 }
 
+// checkInjection detects shell injection patterns that suggest the model was
+// manipulated by repository content. Mirrors Claude Code's
+// isBashSecurityCheckForMisparsing approach.
+func checkInjection(command string) error {
+	if strings.Contains(command, "$(") {
+		return fmt.Errorf("command blocked: command substitution $(...) detected — possible injection")
+	}
+	if strings.Contains(command, "`") {
+		return fmt.Errorf("command blocked: backtick substitution detected — possible injection")
+	}
+	return nil
+}
+
 // checkSegment enforces three layers: redirection detection, destructive
 // pattern matching, and allowlist / approval mode.
 func (r *Runtime) checkSegment(segment string) error {
-	// Layer 1: redirection blocked in all non-yolo modes.
+	// Layer 1: redirection and pipe-to-shell blocked in all non-yolo modes.
 	if hasRedirection(segment) && r.policy.ApprovalMode != "yolo" {
 		return fmt.Errorf("command requires approval: output redirection detected in %q", segment)
 	}
 	// Layer 2: destructive fragments blocked unless explicitly permitted.
-	if !r.policy.AllowDestructive {
-		for _, fragment := range destructiveFragments {
-			if strings.Contains(" "+segment, fragment) {
-				return fmt.Errorf("command blocked by runtime policy: %s", segment)
-			}
-		}
+	if !r.policy.AllowDestructive && isDestructive(segment) {
+		return fmt.Errorf("command blocked by runtime policy: %s", segment)
 	}
 	// Layer 3: yolo and auto allow anything that passed layers 1–2.
 	if r.policy.ApprovalMode == "yolo" || r.policy.ApprovalMode == "auto" {
@@ -387,6 +446,25 @@ func (r *Runtime) checkSegment(segment string) error {
 	return fmt.Errorf("command requires approval in %s mode: %s", r.policy.ApprovalMode, segment)
 }
 
+// isDestructive returns true if the segment matches a known destructive pattern.
+// Uses word-boundary matching to avoid false positives (e.g. "format" in "go fmt").
+var destructiveRE = regexp.MustCompile(
+	`(?i)\b(rm|sudo|dd|mkfs|truncate|shred|wipefs)\b|` +
+		`git\s+(reset|clean|push\s+--force)|` +
+		`\b(chmod|chown)\b`,
+)
+
+func isDestructive(segment string) bool {
+	return destructiveRE.MatchString(segment)
+}
+
+func hasRedirection(segment string) bool {
+	// Catch >, >>, 2>, &>, but not => or -> (common in source code strings).
+	return redirectRE.MatchString(segment)
+}
+
+var redirectRE = regexp.MustCompile(`[^=\-]>[>]?|^>`)
+
 // splitCommands breaks a shell command string on &&, ||, and ; operators.
 func splitCommands(cmd string) []string {
 	var segments []string
@@ -395,15 +473,21 @@ func splitCommands(cmd string) []string {
 		c := cmd[i]
 		switch {
 		case c == '&' && i+1 < len(cmd) && cmd[i+1] == '&':
-			segments = append(segments, strings.TrimSpace(cur.String()))
+			if s := strings.TrimSpace(cur.String()); s != "" {
+				segments = append(segments, s)
+			}
 			cur.Reset()
 			i++
 		case c == '|' && i+1 < len(cmd) && cmd[i+1] == '|':
-			segments = append(segments, strings.TrimSpace(cur.String()))
+			if s := strings.TrimSpace(cur.String()); s != "" {
+				segments = append(segments, s)
+			}
 			cur.Reset()
 			i++
 		case c == ';':
-			segments = append(segments, strings.TrimSpace(cur.String()))
+			if s := strings.TrimSpace(cur.String()); s != "" {
+				segments = append(segments, s)
+			}
 			cur.Reset()
 		default:
 			cur.WriteByte(c)
@@ -412,21 +496,7 @@ func splitCommands(cmd string) []string {
 	if s := strings.TrimSpace(cur.String()); s != "" {
 		segments = append(segments, s)
 	}
-	out := segments[:0]
-	for _, s := range segments {
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-func hasRedirection(segment string) bool {
-	return strings.Contains(segment, ">")
-}
-
-var destructiveFragments = []string{
-	" rm ", " rm-", "sudo ", " git reset", " git clean", "chmod ", "chown ",
+	return segments
 }
 
 // sterilizeEnv strips agent-internal variables from the subprocess environment.

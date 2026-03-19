@@ -25,7 +25,8 @@ const (
 	EventLoopDetected            EventKind = "loop_detected"
 	EventContextWindowWillOverflow EventKind = "context_window_will_overflow"
 
-	EventMemory   EventKind = "memory"
+	EventMemory  EventKind = "memory"
+	EventWarning EventKind = "warning" // non-fatal: session continues
 	EventFinished EventKind = "finished"
 	EventErrored  EventKind = "errored"
 )

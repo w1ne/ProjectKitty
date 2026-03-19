@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const defaultGeminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
@@ -41,10 +42,14 @@ func NewModelPlanner(apiKey string) *ModelPlanner {
 	}
 }
 
-func (p *ModelPlanner) Next(state State) Decision {
-	decision, err := p.next(context.Background(), state)
+// httpClient has a 30-second timeout so a slow or hung Gemini API never
+// blocks the agent loop indefinitely.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+func (p *ModelPlanner) Next(ctx context.Context, state State) Decision {
+	decision, err := p.next(ctx, state)
 	if err != nil {
-		return p.fallback.Next(state)
+		return p.fallback.Next(ctx, state)
 	}
 	return decision
 }
@@ -66,14 +71,17 @@ func (p *ModelPlanner) next(ctx context.Context, state State) (Decision, error) 
 		"generationConfig": map[string]any{"temperature": 0.1, "maxOutputTokens": 256},
 	}
 
-	body, _ := json.Marshal(reqBody)
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return Decision{}, fmt.Errorf("marshal request: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", p.endpoint+"?key="+p.apiKey, bytes.NewReader(body))
 	if err != nil {
 		return Decision{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return Decision{}, err
 	}
