@@ -378,3 +378,48 @@ func TestApplyEditToken(t *testing.T) {
 		t.Errorf("unexpected output: %q", out)
 	}
 }
+
+func TestRuntimeReadFileRejectsPathOutsideWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	parentFile := filepath.Join(dir, "..", "outside.txt")
+	if err := os.WriteFile(parentFile, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	rt := New(Policy{ApprovalMode: "test"})
+	_, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolReadFile,
+		Workspace: dir,
+		Path:      "../outside.txt",
+	})
+	if err == nil {
+		t.Fatal("expected path escape error")
+	}
+	if !strings.Contains(err.Error(), "path escapes workspace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRuntimeReadSymbolRejectsAbsolutePathOutsideWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "auth.go")
+	content := "package auth\n\nfunc AuthMiddleware() {}\n"
+	if err := os.WriteFile(outsidePath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	rt := New(Policy{ApprovalMode: "test"})
+	_, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolReadSymbol,
+		Workspace: dir,
+		Path:      outsidePath,
+		Symbol:    "AuthMiddleware",
+	})
+	if err == nil {
+		t.Fatal("expected path escape error")
+	}
+	if !strings.Contains(err.Error(), "path escapes workspace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

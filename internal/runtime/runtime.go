@@ -349,19 +349,25 @@ func (r *Runtime) readSymbol(call Call) (Result, error) {
 	}, nil
 }
 
-// safePath resolves a workspace-relative path and rejects path traversal.
-func (r *Runtime) safePath(workspace, rel string) (string, error) {
+// safePath resolves a workspace-relative or absolute path and rejects anything
+// outside the workspace root.
+func (r *Runtime) safePath(workspace, target string) (string, error) {
 	wsAbs, err := filepath.Abs(workspace)
 	if err != nil {
 		return "", fmt.Errorf("workspace path: %w", err)
 	}
-	joined := filepath.Join(wsAbs, rel)
-	abs, err := filepath.Abs(joined)
+
+	candidate := target
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(wsAbs, candidate)
+	}
+
+	abs, err := filepath.Abs(candidate)
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
 	if !strings.HasPrefix(abs, wsAbs+string(filepath.Separator)) && abs != wsAbs {
-		return "", fmt.Errorf("path traversal rejected: %s is outside workspace", rel)
+		return "", fmt.Errorf("path escapes workspace: %s", target)
 	}
 	return abs, nil
 }
@@ -731,4 +737,31 @@ func newExecID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func resolveWorkspacePath(workspace, target string) (string, error) {
+	workspaceAbs, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace: %w", err)
+	}
+
+	candidate := target
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(workspaceAbs, candidate)
+	}
+
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve path %q: %w", target, err)
+	}
+
+	rel, err := filepath.Rel(workspaceAbs, candidateAbs)
+	if err != nil {
+		return "", fmt.Errorf("check path %q: %w", target, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes workspace: %s", target)
+	}
+
+	return candidateAbs, nil
 }

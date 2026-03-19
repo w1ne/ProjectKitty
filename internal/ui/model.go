@@ -40,7 +40,7 @@ func NewModel(ctx context.Context, app *agent.Agent, input agent.RunInput) tea.M
 		spinner: s,
 		logs: []string{
 			"Subsystems: planner | intelligence | runtime | memory | UI",
-			"Article 2 scope: focused code reading before validation",
+			"Article 3 scope: execution and validation after focused code reading",
 		},
 	}
 }

@@ -87,6 +87,9 @@ func TestAgentRunPersistsSessionAndFacts(t *testing.T) {
 	if len(facts) == 0 {
 		t.Fatal("expected persisted fact")
 	}
+	if facts[len(facts)-1].Category != "article3-taking-action" {
+		t.Fatalf("unexpected fact category: %q", facts[len(facts)-1].Category)
+	}
 	if !strings.Contains(facts[len(facts)-1].Summary, "go test ./...") || !strings.Contains(facts[len(facts)-1].Summary, "Read symbol AuthMiddleware") {
 		t.Fatalf("unexpected fact summary: %q", facts[len(facts)-1].Summary)
 	}

@@ -36,7 +36,12 @@ Parent process
 
 Same answer. Correct behavior. No frozen process.
 
-That gap — from buffered `os/exec` to PTY-backed execution — is what this article closes. We are building **Claws**, the execution layer for ProjectKitty. Its job is to run commands safely, observe output correctly, and not let one long-running job freeze everything else.
+That gap — from buffered `os/exec` to PTY-backed execution — is what this article is about. We are building **Claws**, the execution layer for ProjectKitty. Its job is to run commands safely, observe output correctly, and not let one long-running job freeze everything else.
+
+The current prototype does not fully implement that runtime yet. This article mixes two things on purpose:
+
+- what exists in the repo today
+- what the next runtime iteration should look like
 
 But before we write code, it's worth looking at what the three most mature CLI agents already learned the hard way.
 
@@ -123,9 +128,9 @@ gVisor is the strongest isolation: the container runs inside a user-space Go ker
 
 ## 2. The PTY Execution Path
 
-We add PTY support using `github.com/creack/pty`. The execution path for shell commands changes from "buffer everything, return at exit" to "stream everything, return at exit."
+The next runtime iteration should add PTY support using `github.com/creack/pty`. That changes shell execution from "buffer everything, return at exit" to "stream everything, return at exit."
 
-The upgraded shell runner:
+Target shell runner:
 
 ```go
 func (r *Runtime) runShell(ctx context.Context, call Call) (Result, error) {
@@ -217,7 +222,7 @@ wait:
 }
 ```
 
-Six things changed from the naive version:
+Six things would change from the naive version:
 
 1. **PTY allocation.** `pty.Start` opens the pseudoterminal. The process believes it has a terminal.
 2. **New process group.** `Setpgid: true` puts the child in its own process group. Killing `-cmd.Process.Pid` kills the group — not just the shell. This is Gemini's approach to process group leaks, applied at the `SysProcAttr` level rather than a post-exit `pgrep` scan.
@@ -232,7 +237,7 @@ Six things changed from the naive version:
 
 Before any command runs, it passes through `checkPolicy`. This is the boundary between the agent and the system. Getting it wrong in either direction is expensive: too loose and the agent deletes something; too tight and it can't do useful work.
 
-The current `Policy` struct:
+The current prototype has a smaller `Policy` struct. The next useful shape is:
 
 ```go
 type Policy struct {
@@ -243,7 +248,7 @@ type Policy struct {
 }
 ```
 
-`checkPolicy` enforces three layers, informed by what we learned from the production tools:
+In the target design, `checkPolicy` should enforce three layers, informed by what we learned from the production tools:
 
 **Layer 1: Command splitting.** Borrowed from Gemini's `splitCommands()`. Before any other check, `checkPolicy` breaks the command on `&&`, `||`, and `;` and evaluates each segment independently. `go test ./... && git push` is two operations with different risk profiles.
 
@@ -285,7 +290,7 @@ func (r *Runtime) checkSegment(segment string) error {
 
 ### Approval Modes
 
-Three modes cover the common cases. Gemini has four — the missing one is `PLAN`, which rewrites the system prompt to physically prevent the model from requesting write operations. We don't implement that yet, but it's the right direction for a future "read-only audit" mode.
+Three modes cover the common cases. Gemini has four — the missing one is `PLAN`, which rewrites the system prompt to physically prevent the model from requesting write operations. We don't implement that yet, but it is the right direction for a future "read-only audit" mode.
 
 | Mode | Shell | Redirection | Destructive |
 |------|-------|-------------|-------------|
@@ -313,7 +318,7 @@ The UI reads from this channel and renders each event as it arrives. But the ori
 
 For a `go test ./...` run that takes thirty seconds, the user sees nothing until it's done.
 
-The fix threads a streaming callback through the runtime so output lines become events as they arrive. The callback carries the `execID` so the observer can verify which run produced a given line:
+The next fix is to thread a streaming callback through the runtime so output lines become events as they arrive. The callback carries the `execID` so the observer can verify which run produced a given line:
 
 ```go
 type StreamFn func(execID string, line string)
@@ -345,19 +350,92 @@ case ActionRunCommand:
     result, err := a.runtime.Execute(ctx, call)
 ```
 
-Now the UI renders test output, build progress, and compiler errors line by line. A failing test is visible the moment it fails, not after the full suite finishes.
+With that change, the UI can render test output, build progress, and compiler errors line by line. A failing test becomes visible the moment it fails, not after the full suite finishes.
 
 This mirrors Codex's `exec_command_output_delta` event model: execution is a lifecycle, not a call that returns a value. The UI subscribes to events; the policy layer subscribes to events; the session logger subscribes to events. They all see the same stream.
 
 ---
 
-## 5. Concurrent Jobs
+## 5. Writing and Editing Files
+
+Reading is not enough. An agent that can only observe cannot fix anything. The next capability after running commands is writing files.
+
+### Atomic Write
+
+`ToolWriteFile` does not open the target path and write into it. It writes content to a temp file in the same directory, then calls `os.Rename` to move it into place. `Rename` is atomic on the same filesystem: no reader ever sees a partial file — the path either points to the old content or the new content, never to a truncated or partially written version. Directories along the path are created automatically with `os.MkdirAll`. A trailing newline is enforced before the write: text files without one cause spurious diff noise in `git diff` and `git show`. `safePath` validation rejects any target path that resolves outside the workspace root, so the tool cannot escape its sandbox via `../` traversal.
+
+### 3-Tier Edit Matching
+
+`ToolEditFile` performs in-place edits. The caller supplies `old_string` and `new_string`; the tool locates `old_string` in the file and replaces it. The challenge is that models frequently generate `old_string` with slightly wrong indentation — close enough for a human to understand, wrong enough for a literal string match to fail.
+
+Claws uses Gemini's 3-tier fallback strategy:
+
+```
+old_string, new_string
+        │
+        ▼
+Tier 1 — Exact match
+  strings.Count(content, oldStr) == 1?
+  ├─ yes → replace, done
+  └─ no (0 or 2+ occurrences) → fall through
+        │
+        ▼
+Tier 2 — Indent-aware match
+  strip leading whitespace from each line of old_string
+  scan file for a block where stripped lines match
+  re-apply actual file indentation to new_string
+  ├─ unique match found → replace, done
+  └─ no unique match → fall through
+        │
+        ▼
+Tier 3 — Token-flexible match
+  tokenize old_string on ()[]{}:=,; and whitespace
+  join tokens with [\s\S]*? to form a regex
+  compile and search
+  ├─ unique match → replace, done
+  └─ no unique match → error: cannot locate edit target
+```
+
+**Tier 1 (Exact):** `strings.Count(content, oldStr) == 1`. CRLF is normalized to LF before comparison. Fails if the string appears zero times (wrong file or wrong content) or two or more times (ambiguous — the model must supply more context).
+
+**Tier 2 (Indent-aware):** Strip leading whitespace from every line of `old_string`, then scan the file for a contiguous block where the stripped lines match. When found, measure the indentation of the first matched line in the file and re-apply that indentation to every line of `new_string`. This handles the common case where the model copies a code block from context but the context had different indentation than what is actually on disk.
+
+**Tier 3 (Token-flexible):** Tokenize `old_string` by splitting on punctuation and whitespace — `()[]{}:=,;` and any whitespace character. Join the tokens with `[\s\S]*?` and compile as a regex. This tolerates whitespace inconsistencies inside identifiers and expressions (e.g., `foo ( x )` matching `foo(x)`). Used as a last resort because it is the most permissive and therefore the most likely to produce a false match in a large file.
+
+### SHA256 Conflict Detection
+
+The caller can pass an `ExpectedHash` — the SHA256 of the file content it read before deciding what to change. Before applying the edit, `ToolEditFile` hashes the current file content and compares:
+
+```go
+if call.ExpectedHash != "" {
+    current, err := os.ReadFile(call.Path)
+    if err != nil {
+        return Result{}, fmt.Errorf("read for hash check: %w", err)
+    }
+    actual := fmt.Sprintf("%x", sha256.Sum256(current))
+    if actual != call.ExpectedHash {
+        return Result{}, fmt.Errorf("conflict: file changed since last read (expected %s, got %s)", call.ExpectedHash, actual)
+    }
+}
+```
+
+If the file changed between the read and the edit — because another tool call or goroutine modified it — the edit is rejected with a conflict error rather than silently overwriting the intervening change. The model can then re-read the file and retry with an updated `old_string`.
+
+### Integration with the Planner
+
+`ModelPlanner` exposes `write_file` and `edit_file` as Gemini function-calling tool definitions with typed parameters. The model chooses between them based on intent: `write_file` for new files or full rewrites where the old content doesn't matter; `edit_file` with the shortest `old_string` that uniquely identifies the target location for surgical changes. After either tool, the planner's next generated step is `run_command` — typically `go build ./...` or the relevant test command — to validate that the change compiles and passes.
+
+`DefaultPlanner` (the rule-based fallback) does not initiate writes. It has no model to generate `new_string` content, so initiating a write would be meaningless. It correctly handles the steps that follow a write — running validation commands, recording results to memory — when a model-driven planner initiates the edit and `DefaultPlanner` takes over for the remaining steps.
+
+---
+
+## 6. Concurrent Jobs
 
 The agent loop runs one action at a time. That is intentional: the planner can't reason about two things simultaneously, and most tasks are sequential. But builds and test suites are not.
 
 When the planner issues `go test ./...`, it shouldn't block the agent from issuing `go vet ./...` while the tests run. These two are independent.
 
-Go's concurrency model handles this naturally. The runtime exposes an `ExecuteAsync` method that returns immediately with a handle:
+Go's concurrency model handles this naturally. One reasonable next step is for the runtime to expose an `ExecuteAsync` method that returns immediately with a handle:
 
 ```go
 type JobHandle struct {
@@ -399,9 +477,9 @@ Bubble Tea's `tea.Cmd` pattern is designed for this — multiple background goro
 
 ---
 
-## 6. What the Runtime Looks Like Now
+## 7. Target Runtime Flow
 
-Let's trace a complete execution. The planner decides to run `go test ./...`:
+The current prototype still uses buffered `exec.CommandContext`. The flow below is the target runtime shape once PTY execution, streaming, and richer policy checks are implemented. The planner decides to run `go test ./...`:
 
 ```
 Step 4 — ActionRunCommand
@@ -445,15 +523,17 @@ Step 4 — ActionRunCommand
 
 **No `write_stdin`.** Codex can respond to interactive prompts mid-execution by writing to the running process's stdin. Claws can't. A command waiting for a yes/no response will hit the inactivity timeout and be killed rather than answered. The PTY gives us the infrastructure for this — the master fd is writable — but the planner has no mechanism yet to decide what to write.
 
+**No conflict-free parallel edits.** `ExpectedHash` detects conflicts after the fact, but two model turns that both read the same file before either writes will each see a clean hash. The second write overwrites the first silently unless the caller explicitly checks the returned conflict error and retries. Preventing this class of bug requires either serializing all edits through a single lock or adopting an optimistic-concurrency protocol at the session level — neither of which is implemented yet.
+
 ---
 
 ## What's Next
 
-ProjectKitty can now read a codebase and run commands against it safely. A session is becoming possible — a real back-and-forth between the planner, the code reader, and the execution layer.
+ProjectKitty can now read a codebase, run commands against it safely, and write or edit files in place. File writing and editing are live: atomic writes via temp-file rename, 3-tier edit matching for model-generated patches, and SHA256 conflict detection to catch concurrent modifications. A session is becoming real — a planner that finds a bug, edits the source, and validates the fix without human intervention.
 
-But each session starts fresh. There is no record of what the agent found last time, no way to resume a task that was interrupted, and no way to accumulate project-specific facts across runs.
+The remaining gaps are policy persistence and sandbox isolation. "Always allow `go test`" resets on restart today. A bubblewrap or gVisor sandbox would let the agent operate with OS-level containment rather than a blocklist.
 
-Article 4 will build the memory layer: session logs in JSONL, durable project facts in a structured store, and the compaction step that converts a long session into a short summary the next run can start from. That is also where policy persistence lands — the `approval_mode` and allowlist entries that today live only in config.
+Article 4 will build the memory layer: session logs in JSONL, durable project facts in a structured store, and the compaction step that converts a long session into a short summary the next run can start from. Policy persistence lands there too — the `approval_mode` and allowlist entries that today live only in config.
 
 ---
 
