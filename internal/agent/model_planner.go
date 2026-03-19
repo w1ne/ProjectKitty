@@ -130,6 +130,12 @@ func buildStatePrompt(state State) string {
 	if state.ValidationTool != nil && state.ValidationTool.Result != nil {
 		fmt.Fprintf(&sb, "- Validation: done — %s\n", state.ValidationTool.Result.Summary)
 	}
+	if state.WriteFileTool != nil && state.WriteFileTool.Result != nil {
+		fmt.Fprintf(&sb, "- Write file: done — %s\n", state.WriteFileTool.Result.Summary)
+	}
+	if state.EditFileTool != nil && state.EditFileTool.Result != nil {
+		fmt.Fprintf(&sb, "- Edit file: done — %s\n", state.EditFileTool.Result.Summary)
+	}
 	if state.MemorySaved {
 		sb.WriteString("- Memory: saved\n")
 	}
@@ -178,8 +184,56 @@ func geminiToolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "run_command",
-			"description": "Run the appropriate validation command for this repository (go test, git status, etc.).",
-			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+			"description": "Run a shell command in the workspace. Provide an explicit command; if omitted the runtime picks the default validation command.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{
+						"type":        "string",
+						"description": "Shell command to run, e.g. \"go test ./...\" or \"git status --short\".",
+					},
+				},
+			},
+		},
+		{
+			"name":        "write_file",
+			"description": "Write (or create) a file at the given workspace-relative path with the provided content.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{
+						"type":        "string",
+						"description": "Workspace-relative path to write, e.g. \"internal/auth/middleware.go\".",
+					},
+					"content": map[string]any{
+						"type":        "string",
+						"description": "Full file content to write.",
+					},
+				},
+				"required": []string{"path", "content"},
+			},
+		},
+		{
+			"name":        "edit_file",
+			"description": "Replace a unique string in an existing file. Uses 3-tier matching: exact → indent-aware → token-flexible.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{
+						"type":        "string",
+						"description": "Workspace-relative path of the file to edit.",
+					},
+					"old_string": map[string]any{
+						"type":        "string",
+						"description": "The exact (or near-exact) text to replace. Must uniquely identify the target location.",
+					},
+					"new_string": map[string]any{
+						"type":        "string",
+						"description": "Replacement text.",
+					},
+				},
+				"required": []string{"path", "old_string", "new_string"},
+			},
 		},
 		{
 			"name":        "save_memory",
@@ -188,8 +242,16 @@ func geminiToolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "finish",
-			"description": "The task is complete. All needed information has been gathered and validated.",
-			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+			"description": "The task is complete. Provide a brief answer summarising what was found or done.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"answer": map[string]any{
+						"type":        "string",
+						"description": "Brief summary of the outcome for the user.",
+					},
+				},
+			},
 		},
 	}
 }
@@ -249,11 +311,39 @@ func functionCallToDecision(name string, args map[string]any) (Decision, error) 
 	case "outline_related":
 		return Decision{Kind: ActionOutlineRelated, Title: "Outline related files"}, nil
 	case "run_command":
-		return Decision{Kind: ActionRunCommand, Title: "Run validation"}, nil
+		command, _ := args["command"].(string)
+		return Decision{Kind: ActionRunCommand, Title: "Run command", Command: command}, nil
+	case "write_file":
+		path, _ := args["path"].(string)
+		content, _ := args["content"].(string)
+		return Decision{
+			Kind:    ActionWriteFile,
+			Title:   "Write file",
+			Detail:  fmt.Sprintf("Write %s", path),
+			Path:    path,
+			Content: content,
+		}, nil
+	case "edit_file":
+		path, _ := args["path"].(string)
+		oldStr, _ := args["old_string"].(string)
+		newStr, _ := args["new_string"].(string)
+		return Decision{
+			Kind:      ActionEditFile,
+			Title:     "Edit file",
+			Detail:    fmt.Sprintf("Edit %s", path),
+			Path:      path,
+			OldString: oldStr,
+			NewString: newStr,
+		}, nil
 	case "save_memory":
 		return Decision{Kind: ActionSaveMemory, Title: "Save memory"}, nil
 	case "finish":
-		return Decision{Kind: ActionFinish, Title: "Finish", Detail: "Model-driven loop completed."}, nil
+		answer, _ := args["answer"].(string)
+		detail := "Model-driven loop completed."
+		if answer != "" {
+			detail = answer
+		}
+		return Decision{Kind: ActionFinish, Title: "Finish", Detail: detail}, nil
 	default:
 		return Decision{}, fmt.Errorf("unknown Gemini function call: %q", name)
 	}

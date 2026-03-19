@@ -20,6 +20,8 @@ const (
 	EventSearchObserved  EventKind = "search_observed"
 	EventOutlineObserved EventKind = "outline_observed"
 	EventSymbolObserved  EventKind = "symbol_observed"
+	EventWriteObserved   EventKind = "write_observed"
+	EventEditObserved    EventKind = "edit_observed"
 
 	// Safety events (Gemini style)
 	EventLoopDetected            EventKind = "loop_detected"
@@ -65,6 +67,16 @@ type ValidationToolState struct {
 	Result *runtime.Result
 }
 
+type WriteFileToolState struct {
+	Call   runtime.Call
+	Result *runtime.Result
+}
+
+type EditFileToolState struct {
+	Call   runtime.Call
+	Result *runtime.Result
+}
+
 type State struct {
 	Input               RunInput
 	SearchTool          *SearchToolState
@@ -72,6 +84,8 @@ type State struct {
 	ReadSymbolTool      *ReadSymbolToolState
 	RelatedOutlineTool  *OutlineToolState
 	ValidationTool      *ValidationToolState
+	WriteFileTool       *WriteFileToolState
+	EditFileTool        *EditFileToolState
 	MemorySaved         bool
 	BroadenedSearch     bool // true after one adaptive broadened search retry
 	Steps               int
@@ -86,17 +100,22 @@ const (
 	ActionInspectSymbol    ActionKind = "inspect_symbol"
 	ActionOutlineRelated   ActionKind = "outline_related"
 	ActionRunCommand       ActionKind = "run_command"
+	ActionWriteFile        ActionKind = "write_file"
+	ActionEditFile         ActionKind = "edit_file"
 	ActionSaveMemory       ActionKind = "save_memory"
 	ActionFinish           ActionKind = "finish"
 )
 
 type Decision struct {
-	Kind     ActionKind
-	Title    string
-	Detail   string
-	Thoughts string // Added for Gemini-style thought emission
-	Command  string
-	Path     string
-	Symbol   string
-	Query    string // optional: model-driven planners can override the search query
+	Kind      ActionKind
+	Title     string
+	Detail    string
+	Thoughts  string // Added for Gemini-style thought emission
+	Command   string
+	Path      string
+	Symbol    string
+	Query     string // optional: model-driven planners can override the search query
+	Content   string // write_file: full content to write
+	OldString string // edit_file: text to replace
+	NewString string // edit_file: replacement text
 }

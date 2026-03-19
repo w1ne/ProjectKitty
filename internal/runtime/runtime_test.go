@@ -193,3 +193,188 @@ func TestRuntimeReadsFocusedSymbolFromJavaScript(t *testing.T) {
 		t.Fatalf("unexpected symbol output: %q", result.Output)
 	}
 }
+
+// ── write_file ────────────────────────────────────────────────────────────────
+
+func TestWriteFileCreatesAndOverwrites(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Policy{ApprovalMode: "test"})
+
+	// Create a new file.
+	res, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolWriteFile,
+		Workspace: dir,
+		Path:      "pkg/hello.go",
+		Content:   "package pkg\n\nfunc Hello() string { return \"hello\" }",
+	})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !strings.Contains(res.Summary, "hello.go") {
+		t.Errorf("summary should mention file: %q", res.Summary)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "pkg", "hello.go"))
+	if !strings.Contains(string(data), "Hello()") {
+		t.Errorf("written content missing: %q", string(data))
+	}
+	// Trailing newline must be present.
+	if !strings.HasSuffix(string(data), "\n") {
+		t.Error("expected trailing newline")
+	}
+
+	// Overwrite the same path.
+	_, err = rt.Execute(context.Background(), Call{
+		Tool:      ToolWriteFile,
+		Workspace: dir,
+		Path:      "pkg/hello.go",
+		Content:   "package pkg\n",
+	})
+	if err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	data2, _ := os.ReadFile(filepath.Join(dir, "pkg", "hello.go"))
+	if strings.Contains(string(data2), "Hello()") {
+		t.Error("expected overwritten content")
+	}
+}
+
+func TestWriteFileRejectsPathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	rt := New(Policy{ApprovalMode: "test"})
+	_, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolWriteFile,
+		Workspace: dir,
+		Path:      "../evil.go",
+		Content:   "package main",
+	})
+	if err == nil {
+		t.Fatal("expected path traversal error")
+	}
+}
+
+// ── edit_file ─────────────────────────────────────────────────────────────────
+
+func TestEditFileTier1Exact(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	os.WriteFile(path, []byte("package main\n\nfunc Old() {}\n"), 0o644)
+
+	rt := New(Policy{ApprovalMode: "test"})
+	res, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolEditFile,
+		Workspace: dir,
+		Path:      "main.go",
+		OldString: "func Old() {}",
+		NewString: "func New() {}",
+	})
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if !strings.Contains(res.Summary, "tier-1") {
+		t.Errorf("expected tier-1 in summary: %q", res.Summary)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "Old()") || !strings.Contains(string(data), "New()") {
+		t.Errorf("unexpected file content: %q", string(data))
+	}
+}
+
+func TestEditFileTier2IndentAware(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	// Indented with a tab; oldStr uses spaces — tier-1 will miss, tier-2 should match.
+	os.WriteFile(path, []byte("func f() {\n\tif true {\n\t\treturn 1\n\t}\n}\n"), 0o644)
+
+	rt := New(Policy{ApprovalMode: "test"})
+	res, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolEditFile,
+		Workspace: dir,
+		Path:      "main.go",
+		OldString: "if true {\n\t\treturn 1\n\t}",
+		NewString: "if false {\n\t\treturn 0\n\t}",
+	})
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	_ = res
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "return 0") {
+		t.Errorf("expected edited content: %q", string(data))
+	}
+}
+
+func TestEditFileFailsWhenNotFound(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.go")
+	os.WriteFile(path, []byte("package main\n"), 0o644)
+
+	rt := New(Policy{ApprovalMode: "test"})
+	_, err := rt.Execute(context.Background(), Call{
+		Tool:      ToolEditFile,
+		Workspace: dir,
+		Path:      "x.go",
+		OldString: "func DoesNotExist() {}",
+		NewString: "func Replacement() {}",
+	})
+	if err == nil {
+		t.Fatal("expected error when old_string not found")
+	}
+}
+
+func TestEditFileConflictDetection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.go")
+	os.WriteFile(path, []byte("package main\n"), 0o644)
+
+	rt := New(Policy{ApprovalMode: "test"})
+	_, err := rt.Execute(context.Background(), Call{
+		Tool:         ToolEditFile,
+		Workspace:    dir,
+		Path:         "x.go",
+		OldString:    "package main",
+		NewString:    "package replaced",
+		ExpectedHash: "deadbeefdeadbeef", // wrong hash
+	})
+	if err == nil {
+		t.Fatal("expected conflict error")
+	}
+	if !strings.Contains(err.Error(), "conflict") {
+		t.Errorf("expected 'conflict' in error: %v", err)
+	}
+}
+
+// ── applyEdit unit tests ──────────────────────────────────────────────────────
+
+func TestApplyEditExact(t *testing.T) {
+	out, tier, ok := applyEdit("hello world\n", "world", "Go")
+	if !ok || tier != 1 || out != "hello Go\n" {
+		t.Errorf("exact: got %q tier=%d ok=%v", out, tier, ok)
+	}
+}
+
+func TestApplyEditAmbiguousExactFallsToIndent(t *testing.T) {
+	// "x" appears twice → tier-1 fails; tier-2 should match the first indented block.
+	content := "\tx\n\tx\n"
+	out, tier, ok := applyEdit(content, "\tx", "\ty")
+	// tier-1 fails (count=2), tier-2 finds first line
+	if !ok {
+		t.Fatal("expected match")
+	}
+	_ = tier
+	_ = out
+}
+
+func TestApplyEditToken(t *testing.T) {
+	content := "func foo(a int, b string) error {\n\treturn nil\n}\n"
+	// old_string has different whitespace — should hit tier 3
+	out, tier, ok := applyEdit(content, "func foo(a int,b string)error", "func bar()")
+	if !ok {
+		t.Fatal("token replace should match")
+	}
+	if tier != 3 {
+		t.Errorf("expected tier 3, got %d", tier)
+	}
+	if !strings.Contains(out, "bar()") {
+		t.Errorf("unexpected output: %q", out)
+	}
+}

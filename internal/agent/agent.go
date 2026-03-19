@@ -273,7 +273,54 @@ func (a *Agent) Run(ctx context.Context, input RunInput) <-chan Event {
 					record(step, "runtime", result.Summary)
 				}
 
-			case ActionSaveMemory:
+			case ActionWriteFile:
+			call := runtime.Call{
+				Tool:      runtime.ToolWriteFile,
+				Workspace: input.Workspace,
+				Path:      decision.Path,
+				Content:   decision.Content,
+			}
+			if !send(newEvent(EventAction, step, "Runtime action", fmt.Sprintf("Write file %s", decision.Path))) {
+				return
+			}
+			result, err := a.runtime.Execute(ctx, call)
+			if err != nil {
+				if !send(newEvent(EventWarning, step, "Write file failed", err.Error())) {
+					return
+				}
+			} else {
+				state.WriteFileTool = &WriteFileToolState{Call: call, Result: &result}
+				if !send(newEvent(EventWriteObserved, step, "File written", result.Summary)) {
+					return
+				}
+				record(step, "write_file", result.Summary)
+			}
+
+		case ActionEditFile:
+			call := runtime.Call{
+				Tool:      runtime.ToolEditFile,
+				Workspace: input.Workspace,
+				Path:      decision.Path,
+				OldString: decision.OldString,
+				NewString: decision.NewString,
+			}
+			if !send(newEvent(EventAction, step, "Runtime action", fmt.Sprintf("Edit file %s", decision.Path))) {
+				return
+			}
+			result, err := a.runtime.Execute(ctx, call)
+			if err != nil {
+				if !send(newEvent(EventWarning, step, "Edit file failed", err.Error())) {
+					return
+				}
+			} else {
+				state.EditFileTool = &EditFileToolState{Call: call, Result: &result}
+				if !send(newEvent(EventEditObserved, step, "File edited", result.Summary)) {
+					return
+				}
+				record(step, "edit_file", result.Summary)
+			}
+
+		case ActionSaveMemory:
 				factSummary := summarizeFact(state)
 				if err := a.memory.SaveFact(memory.Fact{
 					Category: "article1-foundation",
@@ -321,6 +368,12 @@ func summarizeFact(state State) string {
 	}
 	if state.ValidationTool != nil && state.ValidationTool.Result != nil {
 		parts = append(parts, "Validation: "+state.ValidationTool.Result.Summary)
+	}
+	if state.WriteFileTool != nil && state.WriteFileTool.Result != nil {
+		parts = append(parts, "Write: "+state.WriteFileTool.Result.Summary)
+	}
+	if state.EditFileTool != nil && state.EditFileTool.Result != nil {
+		parts = append(parts, "Edit: "+state.EditFileTool.Result.Summary)
 	}
 	if len(parts) == 0 {
 		return "No durable facts captured."

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -28,6 +29,8 @@ const (
 	ToolReadFile   Tool = "read_file"
 	ToolReadSymbol Tool = "read_symbol"
 	ToolListFiles  Tool = "list_files"
+	ToolWriteFile  Tool = "write_file"
+	ToolEditFile   Tool = "edit_file"
 )
 
 // StreamFn receives output lines as they arrive from a running command.
@@ -50,13 +53,17 @@ type Policy struct {
 }
 
 type Call struct {
-	Tool      Tool
-	Workspace string
-	Command   string
-	Path      string
-	Symbol    string
-	Limit     int
-	Stream    StreamFn
+	Tool         Tool
+	Workspace    string
+	Command      string
+	Path         string
+	Symbol       string
+	Limit        int
+	Stream       StreamFn
+	Content      string // write_file: full file content to write
+	OldString    string // edit_file: text to replace
+	NewString    string // edit_file: replacement text
+	ExpectedHash string // edit_file: optional SHA256 of file before edit (conflict detection)
 }
 
 type Result struct {
@@ -88,6 +95,10 @@ func (r *Runtime) Execute(ctx context.Context, call Call) (Result, error) {
 		return r.readSymbol(call)
 	case ToolListFiles:
 		return r.listFiles(call)
+	case ToolWriteFile:
+		return r.writeFile(call)
+	case ToolEditFile:
+		return r.editFile(call)
 	default:
 		return Result{}, fmt.Errorf("unknown tool: %s", call.Tool)
 	}
@@ -388,6 +399,192 @@ func (r *Runtime) listFiles(call Call) (Result, error) {
 		Summary: fmt.Sprintf("Listed %d files.", len(files)),
 		Output:  strings.Join(files, "\n"),
 	}, nil
+}
+
+// writeFile writes content atomically to a workspace-relative path.
+// Directories are created as needed; trailing newline is ensured; the write
+// is staged to a temp file and renamed so readers never see a partial file.
+func (r *Runtime) writeFile(call Call) (Result, error) {
+	path, err := r.safePath(call.Workspace, call.Path)
+	if err != nil {
+		return Result{}, err
+	}
+	content := call.Content
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return Result{}, fmt.Errorf("mkdir: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".kitty-write-*")
+	if err != nil {
+		return Result{}, fmt.Errorf("create temp: %w", err)
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return Result{}, fmt.Errorf("write: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return Result{}, fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+		return Result{}, fmt.Errorf("rename: %w", err)
+	}
+	return Result{
+		Tool:    ToolWriteFile,
+		Summary: fmt.Sprintf("Wrote %d bytes to %s.", len(content), call.Path),
+		Output:  content,
+	}, nil
+}
+
+// editFile applies an in-place string replacement using Gemini's 3-tier
+// matching strategy: exact → indent-aware → token-flexible regex.
+// An optional ExpectedHash guards against concurrent modifications.
+func (r *Runtime) editFile(call Call) (Result, error) {
+	path, err := r.safePath(call.Workspace, call.Path)
+	if err != nil {
+		return Result{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Result{}, err
+	}
+	// Optional conflict detection: caller pins the SHA256 it read earlier.
+	if call.ExpectedHash != "" {
+		h := sha256.Sum256(data)
+		if hex.EncodeToString(h[:]) != call.ExpectedHash {
+			return Result{}, fmt.Errorf("edit conflict: %s modified since last read", call.Path)
+		}
+	}
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	updated, tier, ok := applyEdit(content, call.OldString, call.NewString)
+	if !ok {
+		return Result{}, fmt.Errorf("edit failed: old_string not found in %s (tried 3 tiers)", call.Path)
+	}
+	// Preserve trailing newline of the original file.
+	if strings.HasSuffix(content, "\n") && !strings.HasSuffix(updated, "\n") {
+		updated += "\n"
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".kitty-edit-*")
+	if err != nil {
+		return Result{}, fmt.Errorf("create temp: %w", err)
+	}
+	if _, err := tmp.WriteString(updated); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return Result{}, fmt.Errorf("write: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return Result{}, fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+		return Result{}, fmt.Errorf("rename: %w", err)
+	}
+	return Result{
+		Tool:    ToolEditFile,
+		Summary: fmt.Sprintf("Edited %s (tier-%d match, %d→%d bytes).", call.Path, tier, len(content), len(updated)),
+		Output:  updated,
+	}, nil
+}
+
+// applyEdit tries 3 tiers in order and returns (result, tier, ok).
+func applyEdit(content, oldStr, newStr string) (string, int, bool) {
+	if result, ok := exactReplace(content, oldStr, newStr); ok {
+		return result, 1, true
+	}
+	if result, ok := indentReplace(content, oldStr, newStr); ok {
+		return result, 2, true
+	}
+	if result, ok := tokenReplace(content, oldStr, newStr); ok {
+		return result, 3, true
+	}
+	return content, 0, false
+}
+
+// exactReplace requires exactly one occurrence (CRLF already normalised by caller).
+func exactReplace(content, oldStr, newStr string) (string, bool) {
+	if strings.Count(content, oldStr) == 1 {
+		return strings.Replace(content, oldStr, newStr, 1), true
+	}
+	return content, false
+}
+
+// indentReplace strips leading whitespace from each line of oldStr, scans for
+// a matching block in content, then re-indents newStr to match the actual
+// indentation found in the file.
+func indentReplace(content, oldStr, newStr string) (string, bool) {
+	oldLines := strings.Split(oldStr, "\n")
+	if len(oldLines) == 0 {
+		return content, false
+	}
+	stripped := make([]string, len(oldLines))
+	for i, l := range oldLines {
+		stripped[i] = strings.TrimLeft(l, " \t")
+	}
+	contentLines := strings.Split(content, "\n")
+	for i := 0; i <= len(contentLines)-len(oldLines); i++ {
+		match := true
+		for j, sl := range stripped {
+			if strings.TrimLeft(contentLines[i+j], " \t") != sl {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		actualIndent := leadingWS(contentLines[i])
+		origIndent := leadingWS(oldLines[0])
+		newLines := strings.Split(newStr, "\n")
+		for k, nl := range newLines {
+			if strings.HasPrefix(nl, origIndent) {
+				newLines[k] = actualIndent + nl[len(origIndent):]
+			} else if nl != "" {
+				newLines[k] = actualIndent + strings.TrimLeft(nl, " \t")
+			}
+		}
+		var out []string
+		out = append(out, contentLines[:i]...)
+		out = append(out, newLines...)
+		out = append(out, contentLines[i+len(oldLines):]...)
+		return strings.Join(out, "\n"), true
+	}
+	return content, false
+}
+
+func leadingWS(s string) string {
+	return s[:len(s)-len(strings.TrimLeft(s, " \t"))]
+}
+
+// tokenReplace tokenises oldStr on punctuation/whitespace, joins tokens with
+// \s* and matches against content. Mirrors Gemini CLI's fuzzy edit fallback.
+var tokenSplitRE = regexp.MustCompile(`[\s()\[\]{}<>:=,;]+`)
+
+func tokenReplace(content, oldStr, newStr string) (string, bool) {
+	tokens := tokenSplitRE.Split(strings.TrimSpace(oldStr), -1)
+	var parts []string
+	for _, t := range tokens {
+		if t != "" {
+			parts = append(parts, regexp.QuoteMeta(t))
+		}
+	}
+	if len(parts) == 0 {
+		return content, false
+	}
+	re, err := regexp.Compile(strings.Join(parts, `[\s()\[\]{}<>:=,;]*`))
+	if err != nil {
+		return content, false
+	}
+	loc := re.FindStringIndex(content)
+	if loc == nil {
+		return content, false
+	}
+	return content[:loc[0]] + newStr + content[loc[1]:], true
 }
 
 // checkPolicy splits the command on shell operators and evaluates each segment.
