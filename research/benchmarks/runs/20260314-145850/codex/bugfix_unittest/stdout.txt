@@ -1,0 +1,5 @@
+Fixed [`calculator.py`](/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/codex/bugfix_unittest/workspace/calculator.py#L5) so `compute_total()` returns the accumulated `total` instead of the last loop item. The local unittest suite now passes.
+
+CHANGED_FILES: [`calculator.py`](/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/codex/bugfix_unittest/workspace/calculator.py)  
+TEST_COMMAND: `python3 -m unittest`  
+TEST_RESULT: `OK (Ran 2 tests)`

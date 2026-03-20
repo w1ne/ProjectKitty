@@ -1,0 +1,15 @@
+{
+  "command": [
+    "codex",
+    "-a",
+    "never",
+    "exec",
+    "--ephemeral",
+    "-s",
+    "workspace-write",
+    "-C",
+    "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/codex/long_context_recall/workspace",
+    "--skip-git-repo-check",
+    "Read every markdown file under docs/. Create answers.json that maps each document filename to an object with keys owner, secret_code, and service. Then print answers.json and confirm how many documents were processed."
+  ]
+}

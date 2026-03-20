@@ -1,0 +1,7 @@
+{
+  "benchmark_id": "repo_readonly_audit",
+  "description": "Inspect this repository and extract core architecture locations without editing files.",
+  "status": "completed",
+  "returncode": 0,
+  "duration_seconds": 32.284
+}

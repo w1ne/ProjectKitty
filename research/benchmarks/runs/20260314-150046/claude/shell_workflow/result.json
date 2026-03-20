@@ -1,0 +1,7 @@
+{
+  "benchmark_id": "shell_workflow",
+  "description": "Use shell-centric workflow to summarize TODO items into a report file.",
+  "status": "completed",
+  "returncode": 0,
+  "duration_seconds": 17.828
+}

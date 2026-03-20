@@ -1,0 +1,13 @@
+{
+  "command": [
+    "gemini",
+    "--prompt",
+    "In this workspace, find every TODO under src/. Create report.md that lists counts by file and a total count. Then print the contents of report.md and state the total count in the final response.",
+    "--output-format",
+    "text",
+    "--approval-mode",
+    "yolo",
+    "--extensions",
+    "none"
+  ]
+}

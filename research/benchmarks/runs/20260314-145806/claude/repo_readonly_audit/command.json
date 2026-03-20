@@ -1,0 +1,12 @@
+{
+  "command": [
+    "claude",
+    "-p",
+    "--no-session-persistence",
+    "--output-format",
+    "text",
+    "--permission-mode",
+    "dontAsk",
+    "Inspect this repository without modifying files. Answer in JSON with keys planner_file, runtime_file, memory_file, ui_file, architecture_summary, and confidence. Use repository-relative paths."
+  ]
+}

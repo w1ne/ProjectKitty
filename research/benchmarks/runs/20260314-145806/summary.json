@@ -1,0 +1,10 @@
+[
+  {
+    "agent": "codex",
+    "benchmark_id": "repo_readonly_audit",
+    "status": "completed",
+    "returncode": 0,
+    "duration_seconds": 30.909,
+    "workspace": "/home/andrii/Projects/ClaudeReverse"
+  }
+]

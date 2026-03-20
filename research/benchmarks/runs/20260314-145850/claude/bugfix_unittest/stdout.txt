@@ -1,0 +1,20 @@
+Both tests pass.
+
+---
+
+**CHANGED_FILES:** `calculator.py`
+
+**TEST_COMMAND:** `python3 -m unittest test_calculator.py -v`
+
+**TEST_RESULT:**
+```
+test_compute_total_returns_sum (test_calculator.CalculatorTests) ... ok
+test_normalize_name (test_calculator.CalculatorTests) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.001s
+
+OK
+```
+
+**Fix:** `calculator.py:9` — changed `return item` to `return total`. The loop was accumulating the sum into `total` but then mistakenly returning the last loop variable `item` instead.

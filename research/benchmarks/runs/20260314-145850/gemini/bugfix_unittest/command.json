@@ -1,0 +1,13 @@
+{
+  "command": [
+    "gemini",
+    "--prompt",
+    "Fix the implementation so the local Python unittest suite passes. Run the tests yourself. In the final response, include CHANGED_FILES, TEST_COMMAND, and TEST_RESULT.",
+    "--output-format",
+    "text",
+    "--approval-mode",
+    "yolo",
+    "--extensions",
+    "none"
+  ]
+}

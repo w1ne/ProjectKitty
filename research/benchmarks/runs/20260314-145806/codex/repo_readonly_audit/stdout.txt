@@ -1,0 +1,8 @@
+{
+  "planner_file": "internal/agent/planner.go",
+  "runtime_file": "internal/runtime/runtime.go",
+  "memory_file": "internal/memory/store.go",
+  "ui_file": "internal/ui/model.go",
+  "architecture_summary": "This repository is a small Go terminal coding agent organized into clear subsystems. `cmd/projectkitty/main.go` wires together the planner, intelligence scanner, runtime, memory store, and Bubble Tea UI. The core control loop lives in `internal/agent/agent.go`: it starts a session, asks the planner for the next action, gathers focused repository context through `internal/intelligence/service.go`, runs a policy-checked shell command through the runtime, persists facts/events in durable storage, and emits events to the UI. The planner in `internal/agent/planner.go` is deterministic and state-driven: gather context, run a safe validation command, save memory, then finish. The runtime in `internal/runtime/runtime.go` exposes typed tools (`shell`, `read_file`, `list_files`) with allowlist-based command policy checks. Memory in `internal/memory/store.go` writes session metadata, JSONL event logs, and project facts under `.projectkitty/`. The UI in `internal/ui/model.go` is a Bubble Tea model that subscribes to agent events and renders progress/status in the terminal.",
+  "confidence": 0.98
+}

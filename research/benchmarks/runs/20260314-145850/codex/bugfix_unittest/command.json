@@ -1,0 +1,15 @@
+{
+  "command": [
+    "codex",
+    "-a",
+    "never",
+    "exec",
+    "--ephemeral",
+    "-s",
+    "workspace-write",
+    "-C",
+    "/home/andrii/Projects/ClaudeReverse/research/benchmarks/runs/20260314-145850/codex/bugfix_unittest/workspace",
+    "--skip-git-repo-check",
+    "Fix the implementation so the local Python unittest suite passes. Run the tests yourself. In the final response, include CHANGED_FILES, TEST_COMMAND, and TEST_RESULT."
+  ]
+}
