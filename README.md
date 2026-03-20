@@ -1,27 +1,26 @@
 # ProjectKitty
 
-ProjectKitty is an open-source terminal coding agent focused on practical repository inspection, controlled execution, durable memory, and a responsive terminal UI.
+An open-source terminal coding agent built around four clean subsystems: repository intelligence, PTY-backed execution, durable memory, and a Bubble Tea UI.
 
-Architecture and article notes live under [`docs/articles/`](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/docs/articles/), including [`ARTICLE_1_FOUNDATIONS.md`](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/docs/articles/ARTICLE_1_FOUNDATIONS.md) and [`ARTICLE_2_READING_CODE.md`](/home/andrii/Projects/ClaudeReverse/implementation/projectkitty/docs/articles/ARTICLE_2_READING_CODE.md).
+The build series documenting every architectural decision lives in [`docs/articles/`](docs/articles/):
 
-The current implementation includes:
+| Article | Topic |
+|---------|-------|
+| [Article 1 — Foundations](docs/articles/ARTICLE_1_FOUNDATIONS.md) | Agent loop, planner, event model, Bubble Tea UI |
+| [Article 2 — Reading Code](docs/articles/ARTICLE_2_READING_CODE.md) | Repository search, symbol extraction, context trimming |
+| [Article 3 — Taking Action](docs/articles/ARTICLE_3_TAKING_ACTION.md) | PTY execution, policy gate, streaming output, concurrent jobs |
 
-- planner
-- code intelligence
-- typed tool runtime with policy checks
-- durable memory
-- Bubble Tea terminal UI
+## What It Can Do
 
-Right now the focus is the agentic loop and clean subsystem boundaries rather than deep code parsing, PTY execution, or model integration.
-
-## Current Capabilities
-
-- understands a task and runs a deterministic meow loop
-- gathers focused repository context without reading every file
-- reads the best matching symbol before running validation
-- executes typed runtime actions with explicit policy checks
-- persists session logs and project facts under `.projectkitty/`
-- streams status through a Bubble Tea interface
+- Understands a task and runs a structured agentic loop
+- Searches a repository for relevant files without reading everything
+- Extracts the best matching symbol before acting
+- Runs shell commands in a PTY subprocess with environment sterilization, process group kill, inactivity timeout, and streaming output
+- Writes and edits files atomically with 3-tier fuzzy matching
+- Enforces a configurable policy gate (`manual` / `auto` / `yolo`) before any shell execution
+- Fires independent jobs concurrently via `ExecuteAsync` — tests and linting run in parallel
+- Persists session logs and project facts under `.projectkitty/`
+- Streams every event through a Bubble Tea terminal UI
 
 ## Run
 
@@ -29,7 +28,11 @@ Right now the focus is the agentic loop and clean subsystem boundaries rather th
 go run ./cmd/projectkitty -task "Inspect the repo and validate the Go test suite."
 ```
 
-The current workspace is used as the default target. You can point it at another repository with `-workspace`.
+The current directory is used as the workspace by default. Point it elsewhere with `-workspace`:
+
+```bash
+go run ./cmd/projectkitty -task "Find the auth handler" -workspace ../other-repo
+```
 
 ## Test
 
@@ -37,12 +40,21 @@ The current workspace is used as the default target. You can point it at another
 go test ./...
 ```
 
-For a stricter local check, run:
+For a stricter local check matching CI:
 
 ```bash
-files="$(find . -name '*.go' -type f)"
-test -z "$(gofmt -l $files)"
+test -z "$(gofmt -l $(find . -name '*.go' -type f))"
 go test ./...
 ```
 
-CI runs the same formatting and test checks on every push and pull request through [`.github/workflows/ci.yml`](/home/andrii/Projects/projectKitty/.github/workflows/ci.yml).
+CI runs formatting and tests on every push via [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+## Publishing Articles
+
+To generate LinkedIn-ready images from the Mermaid diagrams and tables in any article:
+
+```bash
+node docs/scripts/render-article.mjs docs/articles/ARTICLE_3_TAKING_ACTION.md
+```
+
+Rendered PNGs land in `docs/articles/images/<article>/` and a `-linkedin.md` file is written alongside the source.
